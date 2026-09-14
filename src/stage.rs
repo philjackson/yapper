@@ -188,6 +188,9 @@ impl Bars {
 
 /// A ring around the button that empties as the silence runs out, so the wait
 /// is something you can see rather than something you have to time.
+///
+/// Green, because the button inside it is red while recording and two reds read
+/// as one shape. Green also says "this is fine" rather than "this is an alarm".
 fn draw_countdown(cr: &cairo::Context, cx: f64, cy: f64, remaining: f32) {
     let radius = BUTTON_RADIUS + 9.0;
     let remaining = remaining.clamp(0.0, 1.0) as f64;
@@ -196,7 +199,7 @@ fn draw_countdown(cr: &cairo::Context, cx: f64, cy: f64, remaining: f32) {
     cr.set_line_cap(cairo::LineCap::Round);
 
     // The track shows how much was there to begin with.
-    cr.set_source_rgba(0.88, 0.2, 0.24, 0.18);
+    cr.set_source_rgba(0.18, 0.76, 0.49, 0.22);
     cr.arc(cx, cy, radius, 0.0, TAU);
     let _ = cr.stroke();
 
@@ -205,7 +208,7 @@ fn draw_countdown(cr: &cairo::Context, cx: f64, cy: f64, remaining: f32) {
     }
     // Clockwise from twelve o'clock, like something running out.
     let start = -FRAC_PI_2;
-    cr.set_source_rgba(0.93, 0.28, 0.31, 0.95);
+    cr.set_source_rgba(0.24, 0.85, 0.56, 0.95);
     cr.arc(cx, cy, radius, start, start + remaining * TAU);
     let _ = cr.stroke();
 }
