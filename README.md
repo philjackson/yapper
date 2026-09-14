@@ -114,7 +114,7 @@ refuses to start in this mode without it rather than losing your words.
 | Toggle from anywhere | `pkill -USR1 yapper` |
 | Quick capture | `yapper --quick` — records on open, copies on close |
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
-| Copy an older one | Select its row and press `Enter`, double-click it, or use the copy button |
+| Copy an older one | Select its row and press `Ctrl+C`, or use the copy button |
 | Delete one | Select its row and press `Delete`, or use the trash button |
 | Know it worked | Every copy raises a desktop notification with the word count |
 

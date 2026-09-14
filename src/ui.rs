@@ -327,12 +327,9 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         move |_, _| app_state.update_action_buttons()
     });
 
-    // Enter or a double click on a row copies it, which is what you almost
-    // always want the history for.
-    list.connect_row_activated({
-        let app_state = Rc::clone(&app_state);
-        move |_, _| app_state.copy_selected()
-    });
+    // Clicking a row only selects it. Copying is something you ask for — with
+    // Ctrl+C or the button — not something a stray click does to your
+    // clipboard.
 
     stage.set_draw_func({
         let app_state = Rc::clone(&app_state);
@@ -977,6 +974,20 @@ fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
     controller.add_shortcut(gtk::Shortcut::new(
         gtk::ShortcutTrigger::parse_string("Escape"),
         Some(stop),
+    ));
+
+    // Ctrl+C rather than Enter: it works wherever the focus happens to be, and
+    // it cannot swallow Enter from a focused button the way a bare Return can.
+    let copy = gtk::CallbackAction::new({
+        let app_state = Rc::clone(app_state);
+        move |_, _| {
+            app_state.copy_selected();
+            glib::Propagation::Stop
+        }
+    });
+    controller.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("<Control>c"),
+        Some(copy),
     ));
 
     let delete = gtk::CallbackAction::new({

@@ -32,7 +32,7 @@ OPTIONS:
 While running:
     Ctrl+Space       Start or stop recording
     Escape           Stop recording (quick capture: stop, copy and close)
-    Enter            Copy the selected recording
+    Ctrl+C           Copy the selected recording
     Delete           Delete the selected recording
 
     pkill -USR1 yapper toggles recording without the window being focused.
