@@ -74,14 +74,15 @@ cached.
 ## Quick capture
 
 `yapper --quick` is the keybind mode: a floating panel opens already recording,
-and closing it puts the transcript on the clipboard.
+and finishing it puts the transcript on the clipboard.
 
 ```
 bind = SUPER, D, exec, yapper --quick
 ```
 
-Press the key, talk, press Escape. The text is on the clipboard by the time the
-panel is gone.
+Press the key, talk, press Enter. The text is on the clipboard by the time the
+panel is gone. Escape throws the recording away instead — as does closing the
+panel, since on a layer surface Escape arrives as a close.
 
 <p align="center">
   <img src="docs/quick.png" alt="The quick capture panel: a compact floating card, already recording" width="440">
@@ -109,10 +110,11 @@ refuses to start in this mode without it rather than losing your words.
 
 | Action | How |
 | --- | --- |
-| Start/stop recording | The microphone button, or `Ctrl+Space` in the window |
-| Stop recording | `Escape` |
+| Start recording | The microphone button, or `Ctrl+Space` in the window |
+| Finish and keep it | `Enter` or `Space` |
+| Throw it away | `Escape` — nothing is transcribed, copied or saved |
 | Toggle from anywhere | `pkill -USR1 yapper` |
-| Quick capture | `yapper --quick` — records on open, copies on close |
+| Quick capture | `yapper --quick` — records on open, copies when you finish |
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
 | Copy an older one | Select its row and press `Ctrl+C`, or use the copy button |
 | Delete one | Select its row and press `Delete`, or use the trash button |
