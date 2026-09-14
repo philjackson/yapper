@@ -39,15 +39,17 @@ cargo build --release
 ./target/release/yapper
 ```
 
-GPU inference is opt-in, because the backend has to be linked at build time and
-not every machine has the SDK for it:
+GPU inference via Vulkan is on by default. The backend is linked at build time,
+so a machine without the Vulkan SDK needs to opt out — and an NVIDIA box can use
+CUDA instead:
 
 ```sh
-cargo build --release --features vulkan   # or --features cuda
+cargo build --release --no-default-features              # CPU only
+cargo build --release --no-default-features -F cuda      # CUDA instead of Vulkan
 ```
 
-No code change is needed — whisper-rs turns `use_gpu` on by itself when a GPU
-feature is compiled in. Measured here on an RTX 5070 with `base.en`, taking an
+No code change is involved — whisper-rs turns `use_gpu` on by itself when a GPU
+backend is compiled in. Measured here on an RTX 5070 with `base.en`, taking an
 11-second clip:
 
 | | Model load | Per transcription |

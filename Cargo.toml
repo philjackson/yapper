@@ -20,7 +20,9 @@ dirs = "6"
 libc = "0.2"
 
 [features]
-# Offload whisper inference to the GPU. Requires the matching SDK at build time.
+# Whisper inference on the GPU. The backend is linked at build time, so a
+# machine without the Vulkan SDK needs --no-default-features to build at all.
+default = ["vulkan"]
 vulkan = ["whisper-rs/vulkan"]
 cuda = ["whisper-rs/cuda"]
 
