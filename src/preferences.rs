@@ -11,6 +11,10 @@ use adw::prelude::*;
 
 use crate::config::{Config, models_dir};
 
+/// Where the ggml models live. The same place `scripts/fetch-model.sh` pulls
+/// from, so the two never disagree.
+pub const MODELS_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/tree/main";
+
 /// Called after every change, with the updated config.
 pub type OnChange = Rc<dyn Fn(&Config)>;
 
@@ -85,6 +89,37 @@ fn transcription_group(
     model_row.add_suffix(&choose);
     model_row.set_activatable_widget(Some(&choose));
     group.add(&model_row);
+
+    // --- where to get one --------------------------------------------------
+    let get_models = adw::ActionRow::builder()
+        .title("Get more models")
+        .subtitle("tiny 75 MB · base 148 MB · small 488 MB · medium 1.5 GB · large 3.1 GB")
+        .subtitle_lines(2)
+        .build();
+    let browse = gtk::Button::builder()
+        .icon_name("web-browser-symbolic")
+        .tooltip_text(MODELS_URL)
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    browse.connect_clicked({
+        let parent = parent.as_ref().clone();
+        move |_| {
+            let window = parent.root().and_downcast::<gtk::Window>();
+            gtk::UriLauncher::new(MODELS_URL).launch(
+                window.as_ref(),
+                gtk::gio::Cancellable::NONE,
+                |result| {
+                    if let Err(err) = result {
+                        eprintln!("yapper: could not open {MODELS_URL}: {err}");
+                    }
+                },
+            );
+        }
+    });
+    get_models.add_suffix(&browse);
+    get_models.set_activatable_widget(Some(&browse));
+    group.add(&get_models);
 
     // --- language ----------------------------------------------------------
     let language = adw::EntryRow::builder()

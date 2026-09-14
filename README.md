@@ -154,6 +154,11 @@ Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
 (148 MB), `small.en` (488 MB), `medium.en` (1.5 GB), `large-v3` (3.1 GB). The
 `.en` models are English-only; drop the suffix for multilingual ones.
 
+Preferences has a **Get more models** row that opens
+[the ggml model repository](https://huggingface.co/ggerganov/whisper.cpp/tree/main);
+download any `ggml-*.bin` from there and point **Model** at it. `scripts/fetch-model.sh`
+does the same from a terminal.
+
 ## How it fits together
 
 | File | Role |

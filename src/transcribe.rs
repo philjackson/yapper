@@ -174,8 +174,10 @@ pub fn spawn(config: &Config) -> Worker {
 fn load_model(path: &Path) -> Result<WhisperContext> {
     if !path.exists() {
         return Err(anyhow!(
-            "model not found at {}\nrun ./scripts/fetch-model.sh to download one",
-            path.display()
+            "model not found at {}\n\nRun ./scripts/fetch-model.sh to download one, or fetch a \
+             ggml model by hand from\n{}\nand point Preferences at it.",
+            path.display(),
+            crate::preferences::MODELS_URL
         ));
     }
     let path = path
