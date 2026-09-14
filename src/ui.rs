@@ -33,6 +33,9 @@ const PREVIEW_EVERY: Duration = Duration::from_millis(500);
 const PREVIEW_MIN_SECS: f32 = 1.0;
 /// Roughly three lines. The tail is what you want to read, not the beginning.
 const PREVIEW_CHARS: usize = 150;
+/// Gaps between words are silence too. Waiting this long before showing the
+/// countdown keeps it from flickering on every breath.
+const COUNTDOWN_AFTER: f32 = 0.35;
 
 #[derive(Clone, PartialEq)]
 enum State {
@@ -724,9 +727,11 @@ impl App {
             0.0
         };
 
+        let countdown = self.countdown();
         let settled = {
             let mut bars = self.bars.borrow_mut();
             bars.advance(level, recording, elapsed, dt);
+            bars.set_countdown(countdown);
             bars.is_at_rest()
         };
         area.queue_draw();
@@ -736,6 +741,38 @@ impl App {
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
+    }
+
+    /// How much of the silence timeout is left, as a fraction, or `None` when
+    /// nothing is counting down.
+    fn countdown(&self) -> Option<f32> {
+        if !matches!(*self.state.borrow(), State::Recording) {
+            return None;
+        }
+        let timeout = self.config.borrow().silence_timeout;
+        if timeout <= 0.0 {
+            return None;
+        }
+        let silence = self.recorder.borrow().as_ref()?.silence_secs();
+        if silence < COUNTDOWN_AFTER {
+            return None;
+        }
+        Some(((timeout - silence) / timeout).clamp(0.0, 1.0))
+    }
+
+    /// What the line under the status says while recording.
+    fn recording_hint(&self, silence: f32, timeout: f32) -> String {
+        if timeout > 0.0 && silence >= COUNTDOWN_AFTER {
+            return format!(
+                "Quiet \u{2014} stopping in {:.1}s",
+                (timeout - silence).max(0.0)
+            );
+        }
+        if self.quick {
+            "Escape to stop and copy".to_string()
+        } else {
+            "Ctrl+Space or Escape to stop".to_string()
+        }
     }
 
     /// Picks up SIGUSR1 and keeps the recording clock honest.
@@ -762,10 +799,13 @@ impl App {
         self.status_label
             .set_label(&format!("Listening  {}:{:02}", secs / 60, secs % 60));
 
+        let timeout = self.config.borrow().silence_timeout;
+        self.hint_label
+            .set_label(&self.recording_hint(silence, timeout));
+
         // End the recording once the room has been quiet for long enough. The
         // recorder only counts silence after the first word, so this cannot
         // fire before anything has been said.
-        let timeout = self.config.borrow().silence_timeout;
         if timeout > 0.0 && silence >= timeout {
             self.stop_recording();
         }

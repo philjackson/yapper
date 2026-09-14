@@ -181,9 +181,20 @@ Set **Stop after silence** in preferences (or `silence_timeout`) and a recording
 ends itself once the room has been quiet for that long — press the key, talk,
 and let go of the whole business.
 
+You can see it happening: a ring empties around the button while the line under
+the status counts down, so the wait is visible rather than something you have
+to time in your head.
+
+<p align="center">
+  <img src="docs/silence.png" alt="The quick capture panel during the silence countdown: a ring draining around the button and the words Quiet, stopping in 2.7 seconds" width="440">
+</p>
+
 It is off by default, because a pause to think is indistinguishable from a
 pause because you have finished. Two to three seconds suits dictation; shorter
 gets impatient with anyone who pauses mid-sentence.
+
+The countdown only appears after about a third of a second of quiet, so the
+gaps between words do not make it flicker.
 
 Silence is measured as the RMS of each audio callback, a few tens of
 milliseconds at a time, and only counts *after* the first word — so a recording

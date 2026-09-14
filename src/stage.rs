@@ -51,6 +51,8 @@ pub struct Bars {
     intensity: f32,
     /// Seconds since the window opened, kept for the pulse rings.
     elapsed: f32,
+    /// Fraction of the silence timeout still to run, when one is counting down.
+    countdown: Option<f32>,
 }
 
 impl Bars {
@@ -73,6 +75,7 @@ impl Bars {
             energy: 0.0,
             intensity: 0.0,
             elapsed: 0.0,
+            countdown: None,
         }
     }
 
@@ -115,12 +118,21 @@ impl Bars {
                 .all(|bar| (bar.amplitude - bar.idle).abs() < 0.002)
     }
 
+    /// `remaining` is the fraction of the silence timeout left, or `None` when
+    /// nothing is counting down.
+    pub fn set_countdown(&mut self, remaining: Option<f32>) {
+        self.countdown = remaining;
+    }
+
     pub fn draw(&self, cr: &cairo::Context, width: f64, height: f64, accent: gdk::RGBA) {
         let (cx, cy) = (width / 2.0, height / 2.0);
         let max_height = (height - 8.0).max(MIN_BAR_HEIGHT);
 
-        if self.intensity > 0.01 {
-            self.draw_pulse(cr, cx, cy, accent);
+        match self.countdown {
+            // The ring replaces the pulse rather than fighting it for space.
+            Some(remaining) => draw_countdown(cr, cx, cy, remaining),
+            None if self.intensity > 0.01 => self.draw_pulse(cr, cx, cy, accent),
+            None => {}
         }
 
         for (i, bar) in self.bars.iter().enumerate() {
@@ -172,6 +184,30 @@ impl Bars {
     fn pulse_phase(&self) -> f64 {
         (self.elapsed as f64 * 0.9).fract()
     }
+}
+
+/// A ring around the button that empties as the silence runs out, so the wait
+/// is something you can see rather than something you have to time.
+fn draw_countdown(cr: &cairo::Context, cx: f64, cy: f64, remaining: f32) {
+    let radius = BUTTON_RADIUS + 9.0;
+    let remaining = remaining.clamp(0.0, 1.0) as f64;
+
+    cr.set_line_width(3.0);
+    cr.set_line_cap(cairo::LineCap::Round);
+
+    // The track shows how much was there to begin with.
+    cr.set_source_rgba(0.88, 0.2, 0.24, 0.18);
+    cr.arc(cx, cy, radius, 0.0, TAU);
+    let _ = cr.stroke();
+
+    if remaining <= 0.0 {
+        return;
+    }
+    // Clockwise from twelve o'clock, like something running out.
+    let start = -FRAC_PI_2;
+    cr.set_source_rgba(0.93, 0.28, 0.31, 0.95);
+    cr.arc(cx, cy, radius, start, start + remaining * TAU);
+    let _ = cr.stroke();
 }
 
 /// A vertical pill: a rectangle with fully rounded ends.
