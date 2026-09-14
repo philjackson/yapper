@@ -28,6 +28,12 @@ pub fn copy(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `wl-copy` is available. It matters because its clipboard survives
+/// yapper exiting, while GTK's own does not.
+pub fn has_wl_copy() -> bool {
+    which("wl-copy").is_some()
+}
+
 /// The tool we'd use to type into the focused window, if any is installed.
 pub fn typing_backend() -> Option<&'static str> {
     ["wtype", "ydotool"].into_iter().find(|t| which(t).is_some())

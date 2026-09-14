@@ -104,3 +104,19 @@ button.circular.delete:hover {
   background-color: #e0333c;
   color: #ffffff;
 }
+
+/* Quick capture: a floating panel on the overlay layer, so it draws its own
+   card. The window itself is transparent and the margin leaves room for the
+   shadow to fall outside the card. */
+window.quick {
+  background-color: transparent;
+}
+
+window.quick .quick-card {
+  margin: 20px;
+  padding: 16px 20px 20px 20px;
+  border-radius: 20px;
+  background-color: @window_bg_color;
+  border: 1px solid alpha(currentColor, 0.12);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}

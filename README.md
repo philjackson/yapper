@@ -28,8 +28,10 @@ selected.
 
 ## Build
 
-Needs a Rust toolchain plus GTK4, libadwaita, cmake and clang (whisper.cpp is
-built from source on the first compile, which takes a few minutes).
+Needs a Rust toolchain plus GTK4, libadwaita, gtk4-layer-shell, cmake and clang
+(whisper.cpp is built from source on the first compile, which takes a few
+minutes). `wl-clipboard` is required for quick capture and recommended
+otherwise.
 
 ```sh
 cargo build --release
@@ -43,6 +45,40 @@ GPU inference is available as an opt-in feature if the SDK is installed:
 cargo build --release --features vulkan   # or --features cuda
 ```
 
+## Quick capture
+
+`yapper --quick` is the keybind mode: a floating panel opens already recording,
+and closing it puts the transcript on the clipboard.
+
+```
+bind = SUPER, D, exec, yapper --quick
+```
+
+Press the key, talk, press Escape. The text is on the clipboard by the time the
+panel is gone.
+
+```
+      ╭──────────────────────────────╮
+      │   ▁▃▁▂   ( ● )   ▂▁▃▁        │
+      │     Listening  0:02          │
+      │   Escape to stop and copy    │
+      ╰──────────────────────────────╯
+```
+
+The panel is a layer-shell surface on the overlay layer, so it floats and takes
+the keyboard without needing a compositor rule — the same treatment a launcher
+like Vicinae gets. On a compositor without layer-shell it falls back to an
+ordinary window, which you can float with a rule matching the app id
+`dev.yapper.Yapper.Quick`.
+
+Recording starts before the model has finished loading; the audio queues up
+behind it. That's the difference between a keybind that feels instant and one
+that doesn't.
+
+Quick capture needs `wl-clipboard` installed. GTK's own clipboard is dropped
+when the process exits, which is precisely when you want the text — so yapper
+refuses to start in this mode without it rather than losing your words.
+
 ## Using it
 
 | Action | How |
@@ -50,14 +86,15 @@ cargo build --release --features vulkan   # or --features cuda
 | Start/stop recording | The microphone button, or `Ctrl+Space` in the window |
 | Stop recording | `Escape` |
 | Toggle from anywhere | `pkill -USR1 yapper` |
+| Quick capture | `yapper --quick` — records on open, copies on close |
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
 | Copy an older one | Select its row and press `Enter`, double-click it, or use the copy button |
 | Delete one | Select its row and press `Delete`, or use the trash button |
 
-Bind the signal to a key in Hyprland so the window doesn't need focus:
+To drive a window that's already open from a key, bind the signal instead:
 
 ```
-bind = SUPER, D, exec, pkill -USR1 yapper || yapper
+bind = SUPER, SHIFT, D, exec, pkill -USR1 yapper || yapper
 ```
 
 `Type` needs [`wtype`](https://github.com/atx/wtype) or `ydotool` (with
@@ -93,6 +130,7 @@ Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
 | `src/output.rs` | Clipboard via `wl-copy`, typing via `wtype`/`ydotool` |
 | `src/history.rs` | Past transcripts on disk, and the "5 minutes ago" labels |
 | `src/config.rs` | `config.toml` handling |
+| `src/cli.rs` | Argument parsing |
 
 ## Where things live
 

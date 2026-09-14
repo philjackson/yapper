@@ -13,6 +13,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::audio::Recorder;
+use crate::cli::Options;
 use crate::config::Config;
 use crate::history::{Entry, History, relative_time};
 use crate::output;
@@ -38,6 +39,11 @@ enum State {
 
 struct App {
     config: Config,
+    /// Quick capture: record on open, copy on close, then exit.
+    quick: bool,
+    /// Set once we've decided to exit, so the close handler stops intervening.
+    quitting: Cell<bool>,
+    app: adw::Application,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
     history: RefCell<History>,
@@ -71,7 +77,7 @@ struct App {
     delete_button: gtk::Button,
 }
 
-pub fn build(app: &adw::Application, config: Config) {
+pub fn build(app: &adw::Application, config: Config, options: Options) {
     load_css();
 
     let worker = transcribe::spawn(&config);
@@ -80,14 +86,19 @@ pub fn build(app: &adw::Application, config: Config) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("yapper")
-        .default_width(560)
-        .default_height(640)
+        .default_width(if options.quick { 460 } else { 560 })
+        .default_height(if options.quick { 240 } else { 640 })
+        .resizable(!options.quick)
         .build();
+
+    if options.quick {
+        float_above_everything(&window);
+    }
 
     // --- The stage: bars behind, button on top -----------------------------
 
     let stage = gtk::DrawingArea::builder()
-        .content_height(196)
+        .content_height(if options.quick { 150 } else { 196 })
         .content_width(400)
         .hexpand(true)
         .build();
@@ -184,37 +195,50 @@ pub fn build(app: &adw::Application, config: Config) {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
-        .margin_top(4)
-        .margin_bottom(16)
-        .margin_start(16)
-        .margin_end(16)
         .build();
     content.append(&overlay);
     content.append(&status_label);
     content.append(&hint_label);
-    content.append(&list_pages);
-    content.append(&actions);
+    if !options.quick {
+        content.append(&list_pages);
+        content.append(&actions);
+    }
 
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&content));
 
-    let header = adw::HeaderBar::builder()
-        .css_classes(["flat"])
-        .title_widget(
-            &gtk::Label::builder()
-                .label("yapper")
-                .css_classes(["title"])
-                .build(),
-        )
-        .build();
+    if options.quick {
+        // No header bar and no window decorations: this is a panel, not a
+        // window. The card is drawn by the stylesheet.
+        content.add_css_class("quick-card");
+        window.set_content(Some(&toasts));
+    } else {
+        content.set_margin_top(4);
+        content.set_margin_bottom(16);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toasts));
-    window.set_content(Some(&toolbar));
+        let header = adw::HeaderBar::builder()
+            .css_classes(["flat"])
+            .title_widget(
+                &gtk::Label::builder()
+                    .label("yapper")
+                    .css_classes(["title"])
+                    .build(),
+            )
+            .build();
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&header);
+        toolbar.set_content(Some(&toasts));
+        window.set_content(Some(&toolbar));
+    }
 
     let app_state = Rc::new(App {
         config,
+        quick: options.quick,
+        quitting: Cell::new(false),
+        app: app.clone(),
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
         history: RefCell::new(history),
@@ -325,10 +349,31 @@ pub fn build(app: &adw::Application, config: Config) {
         }
     });
 
+    window.connect_close_request({
+        let app_state = Rc::clone(&app_state);
+        move |_| {
+            if !app_state.quick || app_state.quitting.get() {
+                return glib::Propagation::Proceed;
+            }
+            // Closing is how you finish a quick capture, so the panel goes away
+            // immediately but the process lives until the text is on the
+            // clipboard.
+            app_state.dismiss();
+            glib::Propagation::Stop
+        }
+    });
+
     install_shortcuts(&window, &app_state);
     install_signal_handler();
 
     window.present();
+
+    // Recording doesn't wait for the model: the microphone can open now and the
+    // audio queues up behind the load. That's the difference between a keybind
+    // that feels instant and one that doesn't.
+    if options.quick {
+        app_state.start_recording();
+    }
 }
 
 impl App {
@@ -382,7 +427,11 @@ impl App {
     fn handle_event(self: &Rc<Self>, event: Event) {
         match event {
             Event::ModelReady => {
-                self.set_state(State::Idle);
+                // In quick capture we're already recording by now, so only the
+                // initial wait is what this clears.
+                if matches!(*self.state.borrow(), State::Loading) {
+                    self.set_state(State::Idle);
+                }
                 // The list grabs focus while the button is still insensitive,
                 // and a focused list selects its first row. Hand focus to the
                 // button now that it can take it, so nothing starts selected.
@@ -391,32 +440,47 @@ impl App {
                 self.update_action_buttons();
             }
             Event::ModelFailed(err) => {
+                eprintln!("yapper: {err}");
                 self.empty_page.set_title("Model unavailable");
                 self.empty_page.set_description(Some(&err));
                 self.set_state(State::Broken("model failed to load".into()));
+                if self.quick && !self.window.is_visible() {
+                    self.quit();
+                }
             }
             Event::Transcribing => self.set_state(State::Working),
             Event::Done(text) => {
                 self.set_state(State::Idle);
                 if text.is_empty() {
-                    self.toast("No speech detected");
+                    self.report("No speech detected");
+                    if self.quick {
+                        self.quit();
+                    }
                     return;
                 }
-                if self.config.copy_to_clipboard
+                // Copying is the whole point of quick capture, whatever the
+                // config says about the normal window.
+                if (self.config.copy_to_clipboard || self.quick)
                     && let Err(err) = output::copy(&text)
                 {
-                    self.toast(&format!("Copy failed: {err}"));
+                    self.report(&format!("Copy failed: {err}"));
                 }
                 if self.config.type_on_finish
                     && let Err(err) = output::type_text(&text)
                 {
-                    self.toast(&format!("{err}"));
+                    self.report(&format!("{err}"));
                 }
                 self.remember(text);
+                if self.quick {
+                    self.quit();
+                }
             }
             Event::Failed(err) => {
                 self.set_state(State::Idle);
-                self.toast(&format!("Transcription failed: {err}"));
+                self.report(&format!("Transcription failed: {err}"));
+                if self.quick {
+                    self.quit();
+                }
             }
         }
     }
@@ -637,7 +701,11 @@ impl App {
         };
 
         self.status_label.set_label(&status);
-        self.hint_label.set_label(hint);
+        self.hint_label.set_label(if self.quick {
+            quick_hint(&state)
+        } else {
+            hint
+        });
         self.mic_button.set_tooltip_text(Some(tooltip));
         self.mic_button.set_sensitive(can_record);
         self.mic_pages
@@ -655,6 +723,67 @@ impl App {
 
     fn toast(&self, message: &str) {
         self.toasts.add_toast(adw::Toast::new(message));
+    }
+
+    /// Say something to the user. A quick capture panel is usually gone or
+    /// going by the time anything goes wrong, so it speaks through stderr.
+    fn report(&self, message: &str) {
+        if self.quick {
+            eprintln!("yapper: {message}");
+        } else {
+            self.toast(message);
+        }
+    }
+
+    /// Finish a quick capture: hide the panel at once, but stay alive until any
+    /// transcription in flight has landed on the clipboard.
+    fn dismiss(self: &Rc<Self>) {
+        let state = self.state.borrow().clone();
+        match state {
+            State::Recording => {
+                self.stop_recording();
+                self.window.set_visible(false);
+            }
+            State::Working => self.window.set_visible(false),
+            _ => self.quit(),
+        }
+    }
+
+    fn quit(&self) {
+        self.quitting.set(true);
+        self.app.quit();
+    }
+}
+
+/// Put the panel on the overlay layer, centred, with the keyboard — the same
+/// treatment a launcher gets, so no compositor rule is needed to float it.
+fn float_above_everything(window: &adw::ApplicationWindow) {
+    use gtk_layer_shell::{KeyboardMode, Layer, LayerShell};
+
+    window.add_css_class("quick");
+
+    if !gtk_layer_shell::is_supported() {
+        eprintln!(
+            "yapper: this compositor has no layer-shell, falling back to an              ordinary window — float it with a rule on app id dev.yapper.Yapper.Quick"
+        );
+        return;
+    }
+
+    window.init_layer_shell();
+    window.set_layer(Layer::Overlay);
+    // Exclusive so Escape reaches us rather than whatever is underneath.
+    window.set_keyboard_mode(KeyboardMode::Exclusive);
+    window.set_namespace(Some("yapper-quick"));
+    // No anchors, so the compositor centres the surface.
+}
+
+/// Quick capture has one way out, and the normal window's hints don't describe it.
+fn quick_hint(state: &State) -> &'static str {
+    match state {
+        State::Recording => "Escape to stop and copy",
+        State::Working => "Copying to the clipboard\u{2026}",
+        State::Loading => "Loading model\u{2026}",
+        _ => "Escape to close",
     }
 }
 
@@ -739,6 +868,11 @@ fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
     let stop = gtk::CallbackAction::new({
         let app_state = Rc::clone(app_state);
         move |_, _| {
+            if app_state.quick {
+                // Escape is how a quick capture ends: stop, copy, close.
+                app_state.dismiss();
+                return glib::Propagation::Stop;
+            }
             if matches!(*app_state.state.borrow(), State::Recording) {
                 app_state.stop_recording();
             }

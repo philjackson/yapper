@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+gtk-layer-shell = { package = "gtk4-layer-shell", version = "0.8" }
 cpal = "0.18"
 whisper-rs = "0.16"
 anyhow = "1"
