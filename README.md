@@ -38,6 +38,15 @@ cargo build --release
 ./target/release/yapper
 ```
 
+To install it properly — on `PATH` and in the application launcher:
+
+```sh
+install -Dm755 target/release/yapper ~/.local/bin/yapper
+install -Dm644 data/dev.yapper.Yapper.desktop \
+    ~/.local/share/applications/dev.yapper.Yapper.desktop
+update-desktop-database ~/.local/share/applications
+```
+
 GPU inference via Vulkan is on by default. The backend is linked at build time,
 so a machine without the Vulkan SDK needs to opt out — and an NVIDIA box can use
 CUDA instead:
@@ -150,6 +159,7 @@ Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
 | `src/history.rs` | Past transcripts on disk, and the "5 minutes ago" labels |
 | `src/config.rs` | `config.toml` handling |
 | `src/cli.rs` | Argument parsing |
+| `data/…desktop` | Launcher entry, for the normal window |
 
 ## Where things live
 
