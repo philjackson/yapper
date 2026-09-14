@@ -11,12 +11,37 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
 pub const TARGET_RATE: u32 = 16_000;
 
+/// Room tone sits well below this; even quiet speech sits above it.
+pub const SILENCE_RMS: f32 = 0.004;
+
+/// Tracks how long the microphone has been quiet, so a recording can end
+/// itself. Silence before the first word does not count — otherwise a
+/// recording started a moment early would stop before you spoke.
+#[derive(Default)]
+struct SilenceTracker {
+    /// Per-channel frames of quiet since the last sound.
+    silent_frames: usize,
+    heard_speech: bool,
+}
+
+impl SilenceTracker {
+    fn observe(&mut self, rms: f32, frames: usize) {
+        if rms >= SILENCE_RMS {
+            self.silent_frames = 0;
+            self.heard_speech = true;
+        } else if self.heard_speech {
+            self.silent_frames += frames;
+        }
+    }
+}
+
 /// Shared between the audio callback and the UI thread.
 #[derive(Default)]
 struct Capture {
     samples: Vec<f32>,
     /// Loudest sample since the UI last looked, for the level meter.
     peak: f32,
+    silence: SilenceTracker,
 }
 
 pub struct Recorder {
@@ -60,6 +85,13 @@ impl Recorder {
             sample_rate: config.sample_rate,
             channels: config.channels,
         })
+    }
+
+    /// How long the microphone has been quiet, in seconds. Stays at zero until
+    /// the first sound, so it cannot trip before anyone has spoken.
+    pub fn silence_secs(&self) -> f32 {
+        let capture = self.capture.lock().unwrap();
+        capture.silence.silent_frames as f32 / self.sample_rate as f32
     }
 
     /// Loudest sample since the last call, as a 0.0..=1.0 level. Resets the peak.
@@ -110,19 +142,28 @@ where
     f32: FromSample<T>,
 {
     let capture = Arc::clone(capture);
+    let channels = config.channels.max(1) as usize;
     device
         .build_input_stream(
             *config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
                 let mut capture = capture.lock().unwrap();
                 capture.samples.reserve(data.len());
+                let mut sum_squares = 0.0f64;
                 for &sample in data {
                     let value = f32::from_sample(sample);
                     capture.samples.push(value);
+                    sum_squares += (value as f64) * (value as f64);
                     let magnitude = value.abs();
                     if magnitude > capture.peak {
                         capture.peak = magnitude;
                     }
+                }
+                // One RMS per callback buffer — a few tens of milliseconds,
+                // which is the right window for "is anyone talking".
+                if !data.is_empty() {
+                    let rms = (sum_squares / data.len() as f64).sqrt() as f32;
+                    capture.silence.observe(rms, data.len() / channels);
                 }
             },
             err_fn,
@@ -249,6 +290,42 @@ fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_is_not_counted_until_something_has_been_said() {
+        let mut tracker = SilenceTracker::default();
+        // A recording started a moment early must not end itself before the
+        // speaker begins.
+        tracker.observe(0.0, 16_000);
+        tracker.observe(0.0, 16_000);
+        assert_eq!(tracker.silent_frames, 0);
+
+        tracker.observe(0.2, 1_600);
+        assert!(tracker.heard_speech);
+        tracker.observe(0.0, 8_000);
+        assert_eq!(tracker.silent_frames, 8_000);
+    }
+
+    #[test]
+    fn a_word_resets_the_silence() {
+        let mut tracker = SilenceTracker::default();
+        tracker.observe(0.3, 1_600);
+        tracker.observe(0.0, 16_000);
+        assert_eq!(tracker.silent_frames, 16_000);
+        // A pause mid-sentence must not count towards the one that ends it.
+        tracker.observe(0.3, 1_600);
+        assert_eq!(tracker.silent_frames, 0);
+    }
+
+    #[test]
+    fn the_threshold_sits_between_room_tone_and_speech() {
+        let mut tracker = SilenceTracker::default();
+        tracker.observe(0.3, 100);
+        tracker.observe(SILENCE_RMS - 0.001, 100);
+        assert_eq!(tracker.silent_frames, 100, "room tone counts as silence");
+        tracker.observe(SILENCE_RMS + 0.001, 100);
+        assert_eq!(tracker.silent_frames, 0, "quiet speech does not");
+    }
 
     #[test]
     fn downmix_averages_channels() {

@@ -745,12 +745,29 @@ impl App {
             self.toggle();
         }
 
-        if matches!(*self.state.borrow(), State::Recording)
-            && let Some(recorder) = self.recorder.borrow().as_ref()
-        {
-            let secs = recorder.duration_secs() as u32;
-            self.status_label
-                .set_label(&format!("Listening  {}:{:02}", secs / 60, secs % 60));
+        if !matches!(*self.state.borrow(), State::Recording) {
+            return;
+        }
+
+        let Some((elapsed, silence)) = self
+            .recorder
+            .borrow()
+            .as_ref()
+            .map(|recorder| (recorder.duration_secs(), recorder.silence_secs()))
+        else {
+            return;
+        };
+
+        let secs = elapsed as u32;
+        self.status_label
+            .set_label(&format!("Listening  {}:{:02}", secs / 60, secs % 60));
+
+        // End the recording once the room has been quiet for long enough. The
+        // recorder only counts silence after the first word, so this cannot
+        // fire before anything has been said.
+        let timeout = self.config.borrow().silence_timeout;
+        if timeout > 0.0 && silence >= timeout {
+            self.stop_recording();
         }
     }
 

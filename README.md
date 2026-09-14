@@ -148,6 +148,7 @@ copy_to_clipboard = true
 type_on_finish = false     # type straight into the focused window
 history_limit = 200        # how many past transcripts to keep
 live_preview = true        # running transcript under the button while you talk
+silence_timeout = 0.0      # seconds of quiet that end a recording; 0 = never
 ```
 
 Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
@@ -174,6 +175,24 @@ does the same from a terminal.
 | `src/cli.rs` | Argument parsing |
 | `data/…desktop` | Launcher entry, for the normal window |
 
+## Ending on silence
+
+Set **Stop after silence** in preferences (or `silence_timeout`) and a recording
+ends itself once the room has been quiet for that long — press the key, talk,
+and let go of the whole business.
+
+It is off by default, because a pause to think is indistinguishable from a
+pause because you have finished. Two to three seconds suits dictation; shorter
+gets impatient with anyone who pauses mid-sentence.
+
+Silence is measured as the RMS of each audio callback, a few tens of
+milliseconds at a time, and only counts *after* the first word — so a recording
+started a moment before you speak will not end itself while you draw breath. A
+word resets the count, so mid-sentence pauses are free.
+
+The threshold is a fixed level rather than an adaptive noise floor, so a very
+quiet microphone or a loud room may want a longer timeout.
+
 ## Where things live
 
 | What | Where |
@@ -191,4 +210,4 @@ kept; the audio is discarded once it has been transcribed.
 - A tray icon or a layer-shell overlay instead of a normal window
 - Preferences UI — the config file is the only way to change settings
 - Searching or editing past transcripts, and keeping the audio alongside them
-- Proper voice activity detection (there is only a crude RMS gate that skips silent clips)
+- Adaptive silence detection — the threshold is a fixed level, not a measured noise floor

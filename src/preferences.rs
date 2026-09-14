@@ -230,7 +230,7 @@ fn output_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
 }
 
 fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("Window").build();
+    let group = adw::PreferencesGroup::builder().title("Recording").build();
 
     let preview = adw::SwitchRow::builder()
         .title("Live transcript")
@@ -246,6 +246,29 @@ fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
         }
     });
     group.add(&preview);
+
+    let silence = adw::SpinRow::builder()
+        .title("Stop after silence")
+        .subtitle("Seconds of quiet that end a recording. 0 waits for you to stop it")
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().silence_timeout as f64,
+            0.0,
+            30.0,
+            0.5,
+            1.0,
+            0.0,
+        ))
+        .digits(1)
+        .build();
+    silence.connect_value_notify({
+        let config = Rc::clone(config);
+        let on_change = Rc::clone(on_change);
+        move |row| {
+            config.borrow_mut().silence_timeout = row.value() as f32;
+            save(&config, &on_change);
+        }
+    });
+    group.add(&silence);
 
     let history = adw::SpinRow::builder()
         .title("Recordings to keep")

@@ -236,13 +236,10 @@ pub(crate) fn run(
     Ok(text.trim().to_string())
 }
 
-/// Room tone sits well below this; even quiet speech sits above it.
-const SILENCE_RMS: f32 = 0.004;
-
 fn is_silent(samples: &[f32]) -> bool {
     let sum_squares: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
     let rms = (sum_squares / samples.len() as f64).sqrt() as f32;
-    rms < SILENCE_RMS
+    rms < crate::audio::SILENCE_RMS
 }
 
 /// Whisper narrates non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and

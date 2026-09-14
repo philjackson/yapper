@@ -25,6 +25,9 @@ pub struct Config {
     /// Show a running transcript while you talk. Costs a re-transcription
     /// every half second, so it wants a GPU build to feel free.
     pub live_preview: bool,
+    /// Stop recording after this many seconds of silence. 0 waits for you to
+    /// stop it yourself.
+    pub silence_timeout: f32,
 }
 
 impl Default for Config {
@@ -38,6 +41,7 @@ impl Default for Config {
             type_on_finish: false,
             history_limit: 200,
             live_preview: true,
+            silence_timeout: 0.0,
         }
     }
 }
