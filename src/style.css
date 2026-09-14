@@ -1,0 +1,93 @@
+/* The round record button, which is the whole point of the window. It keeps a
+   pale face in both light and dark themes so it reads as a physical button
+   sitting on the background rather than a flat patch of it. */
+.mic-button {
+  min-width: 116px;
+  min-height: 116px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: transparent;
+  background-image: linear-gradient(145deg, #fdfcff 0%, #e6e1f3 100%);
+  color: #2b2438;
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.26),
+    0 2px 4px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: background-image 160ms ease, box-shadow 160ms ease;
+}
+
+.mic-button:hover {
+  background-image: linear-gradient(145deg, #ffffff 0%, #eeeaf9 100%);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.3),
+    0 2px 4px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.mic-button:active {
+  background-image: linear-gradient(145deg, #eeeaf9 0%, #ded8ef 100%);
+  box-shadow:
+    0 4px 10px rgba(0, 0, 0, 0.24),
+    inset 0 2px 6px rgba(0, 0, 0, 0.14);
+}
+
+.mic-button:disabled {
+  opacity: 0.45;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.18);
+}
+
+/* Recording is the one state worth shouting about. */
+.mic-button.recording {
+  background-image: linear-gradient(145deg, #ff8a80 0%, #e0333c 100%);
+  color: #ffffff;
+  box-shadow:
+    0 10px 28px rgba(224, 51, 60, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.mic-button.recording:hover {
+  background-image: linear-gradient(145deg, #ff9b92 0%, #ea3f48 100%);
+}
+
+.mic-button:focus-visible {
+  outline: 2px solid alpha(currentColor, 0.5);
+  outline-offset: 4px;
+}
+
+.title {
+  font-weight: 700;
+}
+
+.status {
+  font-size: 1.25em;
+  font-weight: 600;
+  /* The clock digits change every second; a fixed width stops the label
+     shuffling sideways as they do. */
+  font-feature-settings: "tnum";
+}
+
+.status.recording {
+  color: #e0333c;
+}
+
+.status.error {
+  color: #e0333c;
+  font-size: 1em;
+}
+
+.hint {
+  font-size: 0.9em;
+}
+
+.transcript-frame {
+  border-radius: 12px;
+  background-color: alpha(currentColor, 0.05);
+}
+
+.transcript,
+.transcript text {
+  background: transparent;
+  font-size: 1.05em;
+  line-height: 1.45;
+}

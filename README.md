@@ -6,16 +6,18 @@ captured from PipeWire and transcribed on-device by whisper.cpp — nothing leav
 the machine and no API key is needed.
 
 ```
-┌──────────────────────────────┐
-│ ● Recording  0:04            │
-│ ▁▃▅▇▇▅▃▂▁▁▂▄▆▇▅▃▁            │
-│        [  Stop  ]            │
-│ ┌──────────────────────────┐ │
-│ │ the transcript lands here│ │
-│ └──────────────────────────┘ │
-│        Clear  Type  Copy     │
-└──────────────────────────────┘
+        ▁ ▃ ▁ ▂   ( ● )   ▂ ▁ ▃ ▁
+             Listening  0:04
+        Ctrl+Space or Escape to stop
+ ┌──────────────────────────────────┐
+ │ the transcript lands here         │
+ └──────────────────────────────────┘
+              Clear  Type  Copy
 ```
+
+The bars react to the microphone while you talk and settle into a still shape
+when you stop — at which point the animation stops too, so an idle window costs
+nothing. Colours follow the desktop's accent and light/dark preference.
 
 ## Build
 
@@ -38,7 +40,7 @@ cargo build --release --features vulkan   # or --features cuda
 
 | Action | How |
 | --- | --- |
-| Start/stop recording | The Record button, or `Ctrl+Space` in the window |
+| Start/stop recording | The microphone button, or `Ctrl+Space` in the window |
 | Stop recording | `Escape` |
 | Toggle from anywhere | `pkill -USR1 yapper` |
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
@@ -76,7 +78,9 @@ Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
 | --- | --- |
 | `src/audio.rs` | cpal capture, channel downmix, resampling to the 16 kHz mono Whisper wants |
 | `src/transcribe.rs` | whisper.cpp on a dedicated thread, driven by async channels |
-| `src/ui.rs` | The window, the level meter, and the recording state machine |
+| `src/ui.rs` | The window and the recording state machine |
+| `src/stage.rs` | The bars behind the button: layout, easing, and drawing |
+| `src/style.css` | The button, status text and transcript frame |
 | `src/output.rs` | Clipboard via `wl-copy`, typing via `wtype`/`ydotool` |
 | `src/config.rs` | `config.toml` handling |
 

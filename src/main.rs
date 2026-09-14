@@ -3,6 +3,7 @@
 mod audio;
 mod config;
 mod output;
+mod stage;
 mod transcribe;
 mod ui;
 

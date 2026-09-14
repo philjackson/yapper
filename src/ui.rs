@@ -1,9 +1,10 @@
-//! The window: a status line, a level meter, one big record button, and the
-//! transcript. Everything runs on the GTK main thread; recording and inference
-//! happen elsewhere and report back over channels.
+//! The window: a round record button with a row of bars dancing behind it, the
+//! current status underneath, and the transcript below that.
+//!
+//! Everything here runs on the GTK main thread; recording and inference happen
+//! elsewhere and report back over channels.
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -14,10 +15,12 @@ use gtk::glib;
 use crate::audio::Recorder;
 use crate::config::Config;
 use crate::output;
+use crate::stage::Bars;
 use crate::transcribe::{self, Event, Request};
 
-const METER_BARS: usize = 48;
-const TICK: Duration = Duration::from_millis(33);
+/// How often the SIGUSR1 flag and the recording clock are checked. The
+/// animation runs off the frame clock instead, so this can stay lazy.
+const POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, PartialEq)]
 enum State {
@@ -34,15 +37,22 @@ struct App {
     config: Config,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
-    levels: RefCell<VecDeque<f32>>,
+    bars: RefCell<Bars>,
+    /// Frame clock timestamp of the previous animation frame, in microseconds.
+    last_frame: Cell<i64>,
+    first_frame: Cell<i64>,
+    /// Whether a tick callback is currently installed. The animation stops
+    /// itself once the bars settle, so an idle window costs nothing.
+    animating: Cell<bool>,
     requests: async_channel::Sender<Request>,
 
     window: adw::ApplicationWindow,
     toasts: adw::ToastOverlay,
-    status_dot: gtk::Label,
+    stage: gtk::DrawingArea,
+    mic_button: gtk::Button,
+    mic_pages: gtk::Stack,
     status_label: gtk::Label,
-    meter: gtk::DrawingArea,
-    record_button: gtk::Button,
+    hint_label: gtk::Label,
     transcript: gtk::TextView,
     copy_button: gtk::Button,
     type_button: gtk::Button,
@@ -56,51 +66,65 @@ pub fn build(app: &adw::Application, config: Config) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("yapper")
-        .default_width(460)
-        .default_height(560)
+        .default_width(560)
+        .default_height(620)
         .build();
 
-    let status_dot = gtk::Label::builder()
-        .label("\u{25cf}")
-        .css_classes(["status-dot"])
+    // --- The stage: bars behind, button on top -----------------------------
+
+    let stage = gtk::DrawingArea::builder()
+        .content_height(196)
+        .content_width(400)
+        .hexpand(true)
         .build();
+
+    let mic_icon = gtk::Image::from_icon_name("audio-input-microphone-symbolic");
+    mic_icon.set_pixel_size(46);
+    let spinner = adw::Spinner::builder().width_request(42).height_request(42).build();
+
+    let mic_pages = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(150)
+        .build();
+    mic_pages.add_named(&mic_icon, Some("mic"));
+    mic_pages.add_named(&spinner, Some("busy"));
+
+    let mic_button = gtk::Button::builder()
+        .child(&mic_pages)
+        .css_classes(["mic-button"])
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .sensitive(false)
+        .tooltip_text("Start recording (Ctrl+Space)")
+        .build();
+
+    let overlay = gtk::Overlay::builder().child(&stage).build();
+    overlay.add_overlay(&mic_button);
+    overlay.set_measure_overlay(&mic_button, true);
+
+    // --- Status and transcript ---------------------------------------------
+
     let status_label = gtk::Label::builder()
         .label("Loading model\u{2026}")
-        .xalign(0.0)
-        .hexpand(true)
+        .css_classes(["status"])
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-
-    let status_row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    status_row.append(&status_dot);
-    status_row.append(&status_label);
-
-    let meter = gtk::DrawingArea::builder()
-        .content_height(56)
-        .hexpand(true)
-        .build();
-
-    let record_button = gtk::Button::builder()
-        .label("Record")
-        .sensitive(false)
-        .css_classes(["suggested-action", "pill", "record-button"])
-        .halign(gtk::Align::Center)
+    let hint_label = gtk::Label::builder()
+        .label("Ctrl+Space to talk")
+        .css_classes(["hint", "dim-label"])
         .build();
 
     let transcript = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
-        .left_margin(8)
-        .right_margin(8)
-        .top_margin(8)
-        .bottom_margin(8)
+        .left_margin(14)
+        .right_margin(14)
+        .top_margin(12)
+        .bottom_margin(12)
         .css_classes(["transcript"])
         .build();
     let transcript_scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
-        .has_frame(true)
+        .css_classes(["transcript-frame"])
         .child(&transcript)
         .build();
 
@@ -126,23 +150,25 @@ pub fn build(app: &adw::Application, config: Config) {
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(10)
+        .margin_top(4)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
         .build();
-    content.append(&status_row);
-    content.append(&meter);
-    content.append(&record_button);
+    content.append(&overlay);
+    content.append(&status_label);
+    content.append(&hint_label);
     content.append(&transcript_scroll);
     content.append(&actions);
 
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&content));
 
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("yapper", "Ctrl+Space to talk")));
+    let header = adw::HeaderBar::builder()
+        .css_classes(["flat"])
+        .title_widget(&gtk::Label::builder().label("yapper").css_classes(["title"]).build())
+        .build();
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -153,14 +179,18 @@ pub fn build(app: &adw::Application, config: Config) {
         config,
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
-        levels: RefCell::new(VecDeque::from(vec![0.0; METER_BARS])),
+        bars: RefCell::new(Bars::new()),
+        last_frame: Cell::new(0),
+        first_frame: Cell::new(0),
+        animating: Cell::new(false),
         requests: worker.requests,
         window: window.clone(),
         toasts,
-        status_dot,
+        stage: stage.clone(),
+        mic_button: mic_button.clone(),
+        mic_pages,
         status_label,
-        meter: meter.clone(),
-        record_button: record_button.clone(),
+        hint_label,
         transcript: transcript.clone(),
         copy_button: copy_button.clone(),
         type_button: type_button.clone(),
@@ -168,7 +198,7 @@ pub fn build(app: &adw::Application, config: Config) {
 
     app_state.refresh_status();
 
-    record_button.connect_clicked({
+    mic_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
         move |_| app_state.toggle()
     });
@@ -199,16 +229,25 @@ pub fn build(app: &adw::Application, config: Config) {
         move |_| app_state.set_transcript("")
     });
 
-    meter.set_draw_func({
+    stage.set_draw_func({
         let app_state = Rc::clone(&app_state);
-        move |area, cr, width, height| app_state.draw_meter(area, cr, width, height)
+        move |_, cr, width, height| {
+            app_state
+                .bars
+                .borrow()
+                .draw(cr, width as f64, height as f64, accent_color());
+        }
     });
 
-    // Drives the level meter and the recording timer.
-    glib::timeout_add_local(TICK, {
+    // Animation runs off the frame clock, so it matches the display's refresh
+    // rate instead of guessing at one.
+    app_state.start_animating();
+
+    // Signals and the recording clock don't need a frame-rate check-in.
+    glib::timeout_add_local(POLL, {
         let app_state = Rc::clone(&app_state);
         move || {
-            app_state.tick();
+            app_state.poll();
             glib::ControlFlow::Continue
         }
     });
@@ -245,6 +284,7 @@ impl App {
             Ok(recorder) => {
                 *self.recorder.borrow_mut() = Some(recorder);
                 self.set_state(State::Recording);
+                self.start_animating();
             }
             Err(err) => {
                 self.toast(&format!("Microphone unavailable: {err}"));
@@ -258,8 +298,6 @@ impl App {
             return;
         };
         let samples = recorder.finish();
-        self.levels.borrow_mut().iter_mut().for_each(|v| *v = 0.0);
-        self.meter.queue_draw();
 
         if samples.is_empty() {
             self.set_state(State::Idle);
@@ -268,7 +306,11 @@ impl App {
         }
 
         self.set_state(State::Working);
-        if self.requests.send_blocking(Request::Transcribe(samples)).is_err() {
+        if self
+            .requests
+            .send_blocking(Request::Transcribe(samples))
+            .is_err()
+        {
             self.set_state(State::Broken("the transcription worker stopped".into()));
         }
     }
@@ -306,71 +348,69 @@ impl App {
         }
     }
 
-    fn tick(self: &Rc<Self>) {
+    /// Install the tick callback, unless one is already running.
+    fn start_animating(self: &Rc<Self>) {
+        if self.animating.replace(true) {
+            return;
+        }
+        self.stage.add_tick_callback({
+            let app_state = Rc::clone(self);
+            move |area, clock| app_state.animate(area, clock.frame_time())
+        });
+    }
+
+    /// One animation frame. `frame_time` is the frame clock's timestamp in
+    /// microseconds. Returns `Break` once the bars have settled, which uninstalls
+    /// the callback until the next recording.
+    fn animate(self: &Rc<Self>, area: &gtk::DrawingArea, frame_time: i64) -> glib::ControlFlow {
+        if self.first_frame.get() == 0 {
+            self.first_frame.set(frame_time);
+            self.last_frame.set(frame_time);
+        }
+        // Clamp so a stalled frame (a resize, a busy CPU) can't make the bars jump.
+        let dt = ((frame_time - self.last_frame.get()) as f32 / 1e6).clamp(0.0, 0.1);
+        self.last_frame.set(frame_time);
+        let elapsed = (frame_time - self.first_frame.get()) as f32 / 1e6;
+
+        let recording = matches!(*self.state.borrow(), State::Recording);
+        let level = if recording {
+            self.recorder
+                .borrow()
+                .as_ref()
+                .map(|recorder| recorder.take_peak())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        let settled = {
+            let mut bars = self.bars.borrow_mut();
+            bars.advance(level, recording, elapsed, dt);
+            bars.is_at_rest()
+        };
+        area.queue_draw();
+
+        if settled && !recording {
+            self.animating.set(false);
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    }
+
+    /// Picks up SIGUSR1 and keeps the recording clock honest.
+    fn poll(self: &Rc<Self>) {
         if TOGGLE_REQUESTED.swap(false, Ordering::Relaxed) {
             self.window.present();
             self.toggle();
         }
 
-        let recording = matches!(*self.state.borrow(), State::Recording);
-
-        let level = if recording {
-            self.recorder
-                .borrow()
-                .as_ref()
-                .map(|r| r.take_peak())
-                .unwrap_or(0.0)
-        } else {
-            // Let the bars sink back down rather than snapping to flat.
-            self.levels.borrow().back().copied().unwrap_or(0.0) * 0.85
-        };
-
+        if matches!(*self.state.borrow(), State::Recording)
+            && let Some(recorder) = self.recorder.borrow().as_ref()
         {
-            let mut levels = self.levels.borrow_mut();
-            levels.push_back(level);
-            while levels.len() > METER_BARS {
-                levels.pop_front();
-            }
-        }
-        self.meter.queue_draw();
-
-        if recording && let Some(recorder) = self.recorder.borrow().as_ref() {
-            let secs = recorder.duration_secs();
+            let secs = recorder.duration_secs() as u32;
             self.status_label
-                .set_label(&format!("Recording  {:01}:{:02}", secs as u32 / 60, secs as u32 % 60));
+                .set_label(&format!("Listening  {}:{:02}", secs / 60, secs % 60));
         }
-    }
-
-    fn draw_meter(&self, area: &gtk::DrawingArea, cr: &gtk::cairo::Context, width: i32, height: i32) {
-        let color = area.color();
-        let recording = matches!(*self.state.borrow(), State::Recording);
-        let alpha = if recording { 0.95 } else { 0.3 };
-
-        let levels = self.levels.borrow();
-        let bars = levels.len().max(1);
-        let slot = width as f64 / bars as f64;
-        let bar_width = (slot * 0.55).max(1.0);
-        let mid = height as f64 / 2.0;
-
-        if recording {
-            cr.set_source_rgba(0.88, 0.11, 0.14, alpha);
-        } else {
-            cr.set_source_rgba(
-                color.red() as f64,
-                color.green() as f64,
-                color.blue() as f64,
-                alpha,
-            );
-        }
-
-        for (i, level) in levels.iter().enumerate() {
-            // sqrt spreads quiet speech over more of the meter than raw amplitude.
-            let scaled = level.sqrt().clamp(0.0, 1.0) as f64;
-            let bar_height = (scaled * (height as f64 - 6.0)).max(2.0);
-            let x = i as f64 * slot + (slot - bar_width) / 2.0;
-            rounded_bar(cr, x, mid - bar_height / 2.0, bar_width, bar_height);
-        }
-        let _ = cr.fill();
     }
 
     fn set_state(self: &Rc<Self>, state: State) {
@@ -380,29 +420,49 @@ impl App {
 
     fn refresh_status(self: &Rc<Self>) {
         let state = self.state.borrow().clone();
-        let (dot_class, status, button_label, can_record) = match &state {
-            State::Loading => ("busy", "Loading model\u{2026}".to_string(), "Record", false),
-            State::Idle => ("ready", "Ready".to_string(), "Record", true),
-            State::Recording => ("recording", "Recording  0:00".to_string(), "Stop", true),
-            State::Working => ("busy", "Transcribing\u{2026}".to_string(), "Record", false),
-            State::Broken(err) => ("error", err.clone(), "Record", false),
+        let (status, hint, tooltip, busy, can_record) = match &state {
+            State::Loading => (
+                "Loading model\u{2026}".to_string(),
+                "This takes a moment on the first run",
+                "Waiting for the model",
+                true,
+                false,
+            ),
+            State::Idle => (
+                "Ready".to_string(),
+                "Ctrl+Space to talk",
+                "Start recording (Ctrl+Space)",
+                false,
+                true,
+            ),
+            State::Recording => (
+                "Listening  0:00".to_string(),
+                "Ctrl+Space or Escape to stop",
+                "Stop recording (Escape)",
+                false,
+                true,
+            ),
+            State::Working => (
+                "Transcribing\u{2026}".to_string(),
+                "Hang on",
+                "Transcribing",
+                true,
+                false,
+            ),
+            State::Broken(err) => (err.clone(), "See the transcript for details", "Unavailable", false, false),
         };
 
-        for class in ["ready", "busy", "recording", "error"] {
-            self.status_dot.remove_css_class(class);
-        }
-        self.status_dot.add_css_class(dot_class);
         self.status_label.set_label(&status);
-        self.record_button.set_label(button_label);
-        self.record_button.set_sensitive(can_record);
+        self.hint_label.set_label(hint);
+        self.mic_button.set_tooltip_text(Some(tooltip));
+        self.mic_button.set_sensitive(can_record);
+        self.mic_pages
+            .set_visible_child_name(if busy { "busy" } else { "mic" });
 
-        if matches!(state, State::Recording) {
-            self.record_button.remove_css_class("suggested-action");
-            self.record_button.add_css_class("destructive-action");
-        } else {
-            self.record_button.remove_css_class("destructive-action");
-            self.record_button.add_css_class("suggested-action");
-        }
+        let recording = matches!(state, State::Recording);
+        set_css_class(&self.mic_button, "recording", recording);
+        set_css_class(&self.status_label, "recording", recording);
+        set_css_class(&self.status_label, "error", matches!(state, State::Broken(_)));
     }
 
     fn transcript_text(&self) -> String {
@@ -430,8 +490,13 @@ impl App {
         buffer.insert(&mut end, text);
         self.update_action_buttons();
         // Keep the newest text in view.
-        self.transcript
-            .scroll_to_mark(&buffer.create_mark(None, &buffer.end_iter(), false), 0.0, false, 0.0, 1.0);
+        self.transcript.scroll_to_mark(
+            &buffer.create_mark(None, &buffer.end_iter(), false),
+            0.0,
+            false,
+            0.0,
+            1.0,
+        );
     }
 
     fn update_action_buttons(&self) {
@@ -446,16 +511,37 @@ impl App {
     }
 }
 
-fn rounded_bar(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64) {
-    use std::f64::consts::{FRAC_PI_2, PI};
+fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, wanted: bool) {
+    if wanted {
+        widget.add_css_class(class);
+    } else {
+        widget.remove_css_class(class);
+    }
+}
 
-    let radius = (width / 2.0).min(height / 2.0);
-    cr.new_sub_path();
-    cr.arc(x + width - radius, y + radius, radius, -FRAC_PI_2, 0.0);
-    cr.arc(x + width - radius, y + height - radius, radius, 0.0, FRAC_PI_2);
-    cr.arc(x + radius, y + height - radius, radius, FRAC_PI_2, PI);
-    cr.arc(x + radius, y + radius, radius, PI, 3.0 * FRAC_PI_2);
-    cr.close_path();
+/// The user's chosen accent colour, so the bars match the rest of their desktop.
+/// The standalone variant is the one libadwaita adjusts for legibility against
+/// the window background, which matters most in dark mode.
+fn accent_color() -> gtk::gdk::RGBA {
+    let style = adw::StyleManager::default();
+    style.accent_color().to_standalone_rgba(style.is_dark())
+}
+
+/// `pkill -USR1 yapper` toggles recording, so a compositor keybind can drive it
+/// without the window being focused.
+///
+/// The handler itself only flips a flag — anything more would not be
+/// async-signal-safe. The next poll picks the flag up.
+static TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigusr1(_signal: libc::c_int) {
+    TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn install_signal_handler() {
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as libc::sighandler_t);
+    }
 }
 
 fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
@@ -491,36 +577,9 @@ fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
     window.add_controller(controller);
 }
 
-/// `pkill -USR1 yapper` toggles recording, so a compositor keybind can drive it
-/// without the window being focused.
-///
-/// The handler itself only flips a flag — anything more would not be
-/// async-signal-safe. The UI tick picks the flag up a frame later.
-static TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_sigusr1(_signal: libc::c_int) {
-    TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
-}
-
-fn install_signal_handler() {
-    unsafe {
-        libc::signal(libc::SIGUSR1, on_sigusr1 as *const () as libc::sighandler_t);
-    }
-}
-
 fn load_css() {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(
-        "
-        .status-dot { font-size: 11px; }
-        .status-dot.ready { color: #2ec27e; }
-        .status-dot.busy { color: #f5c211; }
-        .status-dot.recording { color: #e01b24; }
-        .status-dot.error { color: #e01b24; }
-        .record-button { min-width: 150px; padding: 10px 24px; }
-        .transcript { font-size: 1.05em; }
-        ",
-    );
+    provider.load_from_string(include_str!("style.css"));
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,

@@ -6,7 +6,7 @@ description = "Push-to-talk speech-to-text for Wayland, with a small GTK4 window
 license = "MIT"
 
 [dependencies]
-adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
 cpal = "0.18"
 whisper-rs = "0.16"
