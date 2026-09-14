@@ -5,26 +5,19 @@ Push-to-talk speech-to-text for Wayland, with a small GTK4 window instead of
 captured from PipeWire and transcribed on-device by whisper.cpp — nothing leaves
 the machine and no API key is needed.
 
-```
-        ▁ ▃ ▁ ▂   ( ● )   ▂ ▁ ▃ ▁
-             Listening  0:04
-        Ctrl+Space or Escape to stop
- ┌──────────────────────────────────┐
- │ Remind me to pick up the...  0:04│
- │ 4 minutes ago                    │
- ├──────────────────────────────────┤
- │ Meeting notes: we agreed...  0:26│
- │ 5 hours ago                      │
- └──────────────────────────────────┘
- (delete)                (type)(copy)
-```
+<p align="center">
+  <img src="docs/window.png" alt="The yapper window: a round microphone button with bars either side, above a list of past transcripts" width="520">
+</p>
 
-The bars react to the microphone while you talk and settle into a still shape
-when you stop — at which point the animation stops too, so an idle window costs
-nothing. Colours follow the desktop's accent and light/dark preference.
+Every transcript is kept, newest first, and the buttons act on whatever row is
+selected. Colours follow the desktop's accent and its light/dark preference.
 
-Every transcript is kept, newest first. The buttons act on whatever row is
-selected.
+While you talk the bars follow your voice; when you stop they settle into a
+still shape and the animation stops with them, so an idle window costs nothing.
+
+<p align="center">
+  <img src="docs/recording.png" alt="The same window while recording: the button is red and the bars have spread out" width="520">
+</p>
 
 ## Build
 
@@ -75,13 +68,9 @@ bind = SUPER, D, exec, yapper --quick
 Press the key, talk, press Escape. The text is on the clipboard by the time the
 panel is gone.
 
-```
-      ╭──────────────────────────────╮
-      │   ▁▃▁▂   ( ● )   ▂▁▃▁        │
-      │     Listening  0:02          │
-      │   Escape to stop and copy    │
-      ╰──────────────────────────────╯
-```
+<p align="center">
+  <img src="docs/quick.png" alt="The quick capture panel: a compact floating card, already recording" width="440">
+</p>
 
 The panel is a layer-shell surface on the overlay layer, so it floats and takes
 the keyboard without needing a compositor rule — the same treatment a launcher

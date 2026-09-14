@@ -380,7 +380,10 @@ impl App {
     fn toggle(self: &Rc<Self>) {
         let state = self.state.borrow().clone();
         match state {
-            State::Idle => self.start_recording(),
+            // Recording needs the microphone, not the model, so a key pressed
+            // during the initial load starts capturing rather than being
+            // swallowed. The audio queues behind the load.
+            State::Idle | State::Loading => self.start_recording(),
             State::Recording => self.stop_recording(),
             _ => {}
         }
@@ -665,10 +668,10 @@ impl App {
         let (status, hint, tooltip, busy, can_record) = match &state {
             State::Loading => (
                 "Loading model\u{2026}".to_string(),
-                "This takes a moment on the first run",
-                "Waiting for the model",
+                "Ready to record — the model is still loading",
+                "Start recording (Ctrl+Space)",
                 true,
-                false,
+                true,
             ),
             State::Idle => (
                 "Ready".to_string(),
