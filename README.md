@@ -83,9 +83,15 @@ type_on_finish = false
 history_limit = 200
 live_preview = true
 silence_timeout = 0.0
+pause_players = true
 ```
 
-Two worth knowing about:
+Three worth knowing about:
+
+**pause_players** pauses whatever is playing over MPRIS while you dictate and
+starts it again afterwards, because anything out of the speakers ends up in the
+transcript. Only players that were actually playing get resumed, so something
+you had paused yourself stays that way. On by default.
 
 **silence_timeout** ends a recording after that many seconds of quiet, so you
 needn't press anything to finish. A ring drains around the button while it

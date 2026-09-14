@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::history::{Entry, History, relative_time};
 use crate::preferences;
 use crate::output;
+use crate::players;
 use crate::stage::Bars;
 use crate::transcribe::{self, Event, Worker};
 
@@ -61,6 +62,8 @@ struct App {
     /// Rows in the same order as the history, so a selected row's index is an
     /// index into the entries.
     rows: RefCell<Vec<adw::ActionRow>>,
+    /// Players we paused for this recording, waiting to be started again.
+    paused_players: RefCell<players::Paused>,
     /// Length of the clip currently being transcribed. Inference is serialised,
     /// so one slot is enough to pair a transcript with its recording.
     pending_duration: Cell<f32>,
@@ -283,6 +286,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         recorder: RefCell::new(None),
         history: RefCell::new(history),
         rows: RefCell::new(Vec::new()),
+        paused_players: RefCell::new(players::Paused::default()),
         pending_duration: Cell::new(0.0),
         bars: RefCell::new(Bars::new()),
         last_frame: Cell::new(0),
@@ -449,6 +453,12 @@ impl App {
     }
 
     fn start_recording(self: &Rc<Self>) {
+        // Quiet the room before opening the microphone rather than after, so
+        // the first moment of the recording is not the tail of a song.
+        if self.config.borrow().pause_players {
+            *self.paused_players.borrow_mut() = players::pause_playing();
+        }
+
         match Recorder::start() {
             Ok(recorder) => {
                 *self.recorder.borrow_mut() = Some(recorder);
@@ -460,6 +470,8 @@ impl App {
                 self.start_animating();
             }
             Err(err) => {
+                // Nothing is going to be recorded, so give the music back.
+                self.resume_players();
                 self.toast(&format!("Microphone unavailable: {err}"));
                 self.set_state(State::Broken(format!("{err:#}")));
             }
@@ -471,6 +483,9 @@ impl App {
             return;
         };
         let samples = recorder.finish();
+        // The microphone is shut, so the music can come back now rather than
+        // waiting for the transcript.
+        self.resume_players();
 
         if samples.is_empty() {
             self.set_state(State::Idle);
@@ -526,6 +541,7 @@ impl App {
             return;
         };
         drop(recorder);
+        self.resume_players();
         self.show_preview("");
         self.preview_label.set_visible(false);
         self.preview_pending.set(false);
@@ -766,6 +782,10 @@ impl App {
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
+    }
+
+    fn resume_players(self: &Rc<Self>) {
+        players::resume(self.paused_players.take());
     }
 
     /// How much of the silence timeout is left, as a fraction, or `None` when

@@ -28,6 +28,9 @@ pub struct Config {
     /// Stop recording after this many seconds of silence. 0 waits for you to
     /// stop it yourself.
     pub silence_timeout: f32,
+    /// Pause anything that is playing while you dictate, and start it again
+    /// afterwards. Speakers bleed into the microphone.
+    pub pause_players: bool,
 }
 
 impl Default for Config {
@@ -42,6 +45,7 @@ impl Default for Config {
             history_limit: 200,
             live_preview: true,
             silence_timeout: 0.0,
+            pause_players: true,
         }
     }
 }

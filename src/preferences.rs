@@ -247,6 +247,21 @@ fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
     });
     group.add(&preview);
 
+    let pause = adw::SwitchRow::builder()
+        .title("Pause media while recording")
+        .subtitle("Anything out of the speakers ends up in the transcript")
+        .active(config.borrow().pause_players)
+        .build();
+    pause.connect_active_notify({
+        let config = Rc::clone(config);
+        let on_change = Rc::clone(on_change);
+        move |row| {
+            config.borrow_mut().pause_players = row.is_active();
+            save(&config, &on_change);
+        }
+    });
+    group.add(&pause);
+
     let silence = adw::SpinRow::builder()
         .title("Stop after silence")
         .subtitle("Seconds of quiet that end a recording. 0 waits for you to stop it")
