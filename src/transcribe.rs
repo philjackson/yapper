@@ -5,6 +5,8 @@
 //! that GTK's main loop can await without blocking.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -13,6 +15,10 @@ use crate::config::Config;
 
 /// Work sent from the UI to the worker.
 pub enum Request {
+    /// A running transcript of speech so far, while the user is still talking.
+    /// Disposable: accuracy matters less than keeping up.
+    Preview(Vec<f32>),
+    /// The real thing, once recording has stopped.
     Transcribe(Vec<f32>),
 }
 
@@ -20,6 +26,8 @@ pub enum Request {
 pub enum Event {
     ModelReady,
     ModelFailed(String),
+    /// A live transcript, superseded by the next one and finally by `Done`.
+    Preview(String),
     Transcribing,
     Done(String),
     Failed(String),
@@ -28,6 +36,25 @@ pub enum Event {
 pub struct Worker {
     pub requests: async_channel::Sender<Request>,
     pub events: async_channel::Receiver<Event>,
+    /// Raised when the real transcription is queued, so a preview still running
+    /// gives up its slice of the GPU instead of delaying the text that counts.
+    interrupt: Arc<AtomicBool>,
+}
+
+impl Worker {
+    /// Send the final audio, cutting short any preview in flight.
+    pub fn transcribe(&self, samples: Vec<f32>) -> Result<()> {
+        self.interrupt.store(true, Ordering::Relaxed);
+        self.requests
+            .send_blocking(Request::Transcribe(samples))
+            .map_err(|_| anyhow!("the transcription worker stopped"))
+    }
+
+    /// Send a preview. Dropped silently if the worker is busy or gone — a
+    /// missed preview costs nothing.
+    pub fn preview(&self, samples: Vec<f32>) {
+        let _ = self.requests.try_send(Request::Preview(samples));
+    }
 }
 
 /// Start the worker. Returns immediately; the model loads in the background and
@@ -35,6 +62,8 @@ pub struct Worker {
 pub fn spawn(config: &Config) -> Worker {
     let (request_tx, request_rx) = async_channel::unbounded::<Request>();
     let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let worker_interrupt = Arc::clone(&interrupt);
 
     let model_path = config.model_path.clone();
     let language = config.language_code().map(str::to_owned);
@@ -56,13 +85,45 @@ pub fn spawn(config: &Config) -> Worker {
             };
 
             while let Ok(request) = request_rx.recv_blocking() {
-                let Request::Transcribe(samples) = request;
-                let _ = event_tx.send_blocking(Event::Transcribing);
-                let event = match run(&context, &samples, language.as_deref(), threads, translate) {
-                    Ok(text) => Event::Done(text),
-                    Err(err) => Event::Failed(format!("{err:#}")),
-                };
-                let _ = event_tx.send_blocking(event);
+                match request {
+                    Request::Preview(samples) => {
+                        // Stale the moment the user stops talking.
+                        if worker_interrupt.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        let abort = Arc::clone(&worker_interrupt);
+                        let text = run(
+                            &context,
+                            &samples,
+                            language.as_deref(),
+                            threads,
+                            translate,
+                            Some(Box::new(move || abort.load(Ordering::Relaxed))),
+                        )
+                        .unwrap_or_default();
+                        // Always answer unless we were cut short, so the UI
+                        // knows the slot is free again even after a failure.
+                        if !worker_interrupt.load(Ordering::Relaxed) {
+                            let _ = event_tx.send_blocking(Event::Preview(text));
+                        }
+                    }
+                    Request::Transcribe(samples) => {
+                        worker_interrupt.store(false, Ordering::Relaxed);
+                        let _ = event_tx.send_blocking(Event::Transcribing);
+                        let event = match run(
+                            &context,
+                            &samples,
+                            language.as_deref(),
+                            threads,
+                            translate,
+                            None,
+                        ) {
+                            Ok(text) => Event::Done(text),
+                            Err(err) => Event::Failed(format!("{err:#}")),
+                        };
+                        let _ = event_tx.send_blocking(event);
+                    }
+                }
             }
         })
         .expect("spawning the whisper worker thread");
@@ -70,6 +131,7 @@ pub fn spawn(config: &Config) -> Worker {
     Worker {
         requests: request_tx,
         events: event_rx,
+        interrupt,
     }
 }
 
@@ -93,6 +155,8 @@ pub(crate) fn run(
     language: Option<&str>,
     threads: i32,
     translate: bool,
+    // Present for previews, which are allowed to give up part way.
+    abort: Option<Box<dyn FnMut() -> bool + 'static>>,
 ) -> Result<String> {
     // Whisper invents speech when handed silence or a fragment, so screen both
     // out before they reach the model.
@@ -101,6 +165,13 @@ pub(crate) fn run(
     }
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    if let Some(abort) = abort {
+        params.set_abort_callback_safe(abort);
+        // Previews trade accuracy for latency: no temperature fallback, which
+        // is what makes a hard segment take several times as long.
+        params.set_temperature_inc(0.0);
+        params.set_no_context(true);
+    }
     params.set_language(language);
     params.set_n_threads(threads);
     params.set_translate(translate);
@@ -183,7 +254,7 @@ mod tests {
         let samples = read_pcm16_wav(&path);
         let config = Config::load().expect("loading config");
         let context = load_model(&config.model_path).expect("loading the model");
-        let text = run(&context, &samples, Some("en"), config.thread_count(), false)
+        let text = run(&context, &samples, Some("en"), config.thread_count(), false, None)
             .expect("transcribing");
         println!("transcript: {text}");
         assert!(!text.is_empty());

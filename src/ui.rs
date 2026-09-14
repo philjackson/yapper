@@ -18,13 +18,20 @@ use crate::config::Config;
 use crate::history::{Entry, History, relative_time};
 use crate::output;
 use crate::stage::Bars;
-use crate::transcribe::{self, Event, Request};
+use crate::transcribe::{self, Event, Worker};
 
 /// How often the SIGUSR1 flag and the recording clock are checked. The
 /// animation runs off the frame clock instead, so this can stay lazy.
 const POLL: Duration = Duration::from_millis(100);
 /// How often "just now" is allowed to become "2 minutes ago".
 const RESTAMP: Duration = Duration::from_secs(30);
+/// How often the running transcript is refreshed while recording. One preview
+/// is in flight at a time, so a slow pass just means fewer updates.
+const PREVIEW_EVERY: Duration = Duration::from_millis(500);
+/// Whisper invents words from a fragment, so wait for something to work with.
+const PREVIEW_MIN_SECS: f32 = 1.0;
+/// Roughly three lines. The tail is what you want to read, not the beginning.
+const PREVIEW_CHARS: usize = 150;
 
 #[derive(Clone, PartialEq)]
 enum State {
@@ -60,7 +67,10 @@ struct App {
     /// Whether a tick callback is currently installed. The animation stops
     /// itself once the bars settle, so an idle window costs nothing.
     animating: Cell<bool>,
-    requests: async_channel::Sender<Request>,
+    worker: Worker,
+    /// One preview at a time: sending more only queues work behind the one
+    /// that is already too old.
+    preview_pending: Cell<bool>,
 
     window: adw::ApplicationWindow,
     toasts: adw::ToastOverlay,
@@ -69,6 +79,7 @@ struct App {
     mic_pages: gtk::Stack,
     status_label: gtk::Label,
     hint_label: gtk::Label,
+    preview_label: gtk::Label,
     list: gtk::ListBox,
     list_pages: gtk::Stack,
     empty_page: adw::StatusPage,
@@ -81,6 +92,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     load_css();
 
     let worker = transcribe::spawn(&config);
+    let events = worker.events.clone();
     let history = History::load(config.history_limit);
 
     let window = adw::ApplicationWindow::builder()
@@ -142,6 +154,19 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         .css_classes(["hint", "dim-label"])
         .build();
 
+    // The running transcript. A fixed height keeps the panel from jumping
+    // about as the text grows a line.
+    let preview_label = gtk::Label::builder()
+        .css_classes(["preview"])
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
+        .max_width_chars(44)
+        .height_request(58)
+        .valign(gtk::Align::Start)
+        .visible(false)
+        .build();
+
     // --- History list ------------------------------------------------------
 
     let list = gtk::ListBox::builder()
@@ -199,6 +224,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     content.append(&overlay);
     content.append(&status_label);
     content.append(&hint_label);
+    content.append(&preview_label);
     if !options.quick {
         content.append(&list_pages);
         content.append(&actions);
@@ -248,7 +274,8 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         last_frame: Cell::new(0),
         first_frame: Cell::new(0),
         animating: Cell::new(false),
-        requests: worker.requests,
+        preview_pending: Cell::new(false),
+        worker,
         window: window.clone(),
         toasts,
         stage: stage.clone(),
@@ -256,6 +283,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         mic_pages,
         status_label,
         hint_label,
+        preview_label,
         list: list.clone(),
         list_pages,
         empty_page,
@@ -329,6 +357,17 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         }
     });
 
+    // The running transcript, while recording.
+    glib::timeout_add_local(PREVIEW_EVERY, {
+        let app_state = Rc::clone(&app_state);
+        move || {
+            if matches!(*app_state.state.borrow(), State::Recording) {
+                app_state.request_preview();
+            }
+            glib::ControlFlow::Continue
+        }
+    });
+
     // Relative timestamps drift out of date on their own.
     glib::timeout_add_local(RESTAMP, {
         let app_state = Rc::clone(&app_state);
@@ -341,7 +380,6 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     // Worker events arrive here without blocking the main loop.
     glib::spawn_future_local({
         let app_state = Rc::clone(&app_state);
-        let events = worker.events;
         async move {
             while let Ok(event) = events.recv().await {
                 app_state.handle_event(event);
@@ -393,6 +431,10 @@ impl App {
         match Recorder::start() {
             Ok(recorder) => {
                 *self.recorder.borrow_mut() = Some(recorder);
+                self.show_preview("");
+                // Claim the space now rather than letting the window jump when
+                // the first preview arrives a second or two later.
+                self.preview_label.set_visible(self.config.live_preview);
                 self.set_state(State::Recording);
                 self.start_animating();
             }
@@ -417,14 +459,37 @@ impl App {
 
         self.pending_duration
             .set(samples.len() as f32 / crate::audio::TARGET_RATE as f32);
+        // Any preview still running is now pointless; the worker drops it.
+        self.preview_pending.set(false);
         self.set_state(State::Working);
-        if self
-            .requests
-            .send_blocking(Request::Transcribe(samples))
-            .is_err()
-        {
+        if self.worker.transcribe(samples).is_err() {
             self.set_state(State::Broken("the transcription worker stopped".into()));
         }
+    }
+
+    /// Ask for a refreshed running transcript, unless one is already being made.
+    fn request_preview(self: &Rc<Self>) {
+        if !self.config.live_preview || self.preview_pending.get() {
+            return;
+        }
+        let Some(samples) = self
+            .recorder
+            .borrow()
+            .as_ref()
+            .filter(|recorder| recorder.duration_secs() >= PREVIEW_MIN_SECS)
+            .map(|recorder| recorder.snapshot())
+        else {
+            return;
+        };
+        self.preview_pending.set(true);
+        self.worker.preview(samples);
+    }
+
+    /// Show the tail of the running transcript, or hide the label when empty.
+    fn show_preview(self: &Rc<Self>, text: &str) {
+        let text = tail(text, PREVIEW_CHARS);
+        self.preview_label.set_visible(!text.is_empty());
+        self.preview_label.set_label(&text);
     }
 
     fn handle_event(self: &Rc<Self>, event: Event) {
@@ -451,6 +516,14 @@ impl App {
                     self.quit();
                 }
             }
+            Event::Preview(text) => {
+                self.preview_pending.set(false);
+                // An empty preview means the pass failed or found nothing yet;
+                // keep whatever was on screen rather than blinking it away.
+                if !text.is_empty() && matches!(*self.state.borrow(), State::Recording) {
+                    self.show_preview(&text);
+                }
+            }
             Event::Transcribing => self.set_state(State::Working),
             Event::Done(text) => {
                 self.set_state(State::Idle);
@@ -472,6 +545,11 @@ impl App {
                     && let Err(err) = output::type_text(&text)
                 {
                     self.report(&format!("{err}"));
+                }
+                if self.quick {
+                    self.show_preview(&text);
+                } else {
+                    self.show_preview("");
                 }
                 self.remember(text);
                 if self.quick {
@@ -790,6 +868,20 @@ fn quick_hint(state: &State) -> &'static str {
     }
 }
 
+/// The last `max_chars` or so of `text`, cut at a word boundary. The newest
+/// words are the ones worth showing, so the start is what gets dropped.
+fn tail(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let skip = text.chars().count() - max_chars;
+    let cut: String = text.chars().skip(skip).collect();
+    // Prefer starting at a word boundary, as long as one is close by.
+    let start = cut.find(' ').filter(|at| *at < 24).map_or(0, |at| at + 1);
+    format!("\u{2026}{}", &cut[start..])
+}
+
 fn build_row(entry: &Entry) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         // Transcripts are arbitrary text, so they are never markup.
@@ -911,5 +1003,34 @@ fn load_css() {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_transcript_is_shown_whole() {
+        assert_eq!(tail("hello there", 50), "hello there");
+        assert_eq!(tail("  padded  ", 50), "padded");
+    }
+
+    #[test]
+    fn a_long_transcript_keeps_its_tail() {
+        let text = "one two three four five six seven eight nine ten";
+        let shown = tail(text, 20);
+        assert!(shown.starts_with('\u{2026}'), "{shown}");
+        assert!(text.ends_with(shown.trim_start_matches('\u{2026}')), "{shown}");
+        // Cut at a word boundary rather than mid-word.
+        assert!(!shown.trim_start_matches('\u{2026}').starts_with(' '));
+        assert!(shown.chars().count() <= 22, "{shown}");
+    }
+
+    #[test]
+    fn multibyte_text_is_not_split_mid_character() {
+        let text = "café naïve résumé über schön mañana";
+        let shown = tail(text, 10);
+        assert!(text.ends_with(shown.trim_start_matches('\u{2026}')), "{shown}");
     }
 }

@@ -12,6 +12,12 @@ the machine and no API key is needed.
 Every transcript is kept, newest first, and the buttons act on whatever row is
 selected. Colours follow the desktop's accent and its light/dark preference.
 
+While you talk, a running transcript appears under the button — yapper
+re-transcribes what it has heard so far twice a second, so earlier words can
+change as later context arrives. The text that gets copied is a separate, full
+pass made once you stop. Turn it off with `live_preview = false` if you would
+rather not spend the GPU on it.
+
 While you talk the bars follow your voice; when you stop they settle into a
 still shape and the animation stops with them, so an idle window costs nothing.
 
@@ -124,6 +130,7 @@ threads = 0                # 0 = pick from the CPU count
 copy_to_clipboard = true
 type_on_finish = false     # type straight into the focused window
 history_limit = 200        # how many past transcripts to keep
+live_preview = true        # running transcript under the button while you talk
 ```
 
 Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
@@ -158,7 +165,6 @@ kept; the audio is discarded once it has been transcribed.
 
 ## Not done yet
 
-- Streaming transcription (audio is currently sent to Whisper once recording stops)
 - A tray icon or a layer-shell overlay instead of a normal window
 - Preferences UI — the config file is the only way to change settings
 - Searching or editing past transcripts, and keeping the audio alongside them

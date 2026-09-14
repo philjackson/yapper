@@ -80,6 +80,14 @@
   font-size: 0.9em;
 }
 
+/* The running transcript. Deliberately quieter than the status above it: it
+   is provisional text that will be revised as more context arrives. */
+.preview {
+  font-size: 0.95em;
+  color: alpha(currentColor, 0.7);
+  padding: 2px 6px 0 6px;
+}
+
 /* The history list. Adwaita's boxed-list does most of the work; this only
    gives the rows a little more room to breathe and keeps the transcript itself
    the most legible thing in the row. */

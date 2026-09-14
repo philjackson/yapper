@@ -73,13 +73,27 @@ impl Recorder {
         capture.samples.len() as f32 / (self.sample_rate as f32 * self.channels as f32)
     }
 
+    /// Everything captured so far, without interrupting the recording. Used to
+    /// keep a live transcript up to date while the user is still talking.
+    pub fn snapshot(&self) -> Vec<f32> {
+        let raw = self.capture.lock().unwrap().samples.clone();
+        self.prepare(raw)
+    }
+
     /// Stop capturing and hand back 16 kHz mono audio ready for Whisper.
     pub fn finish(self) -> Vec<f32> {
         let raw = {
             let mut capture = self.capture.lock().unwrap();
             std::mem::take(&mut capture.samples)
         };
+        // Convert before dropping the stream, since prepare needs the
+        // stream's rate and channel count.
+        let prepared = self.prepare(raw);
         drop(self._stream);
+        prepared
+    }
+
+    fn prepare(&self, raw: Vec<f32>) -> Vec<f32> {
         let mono = downmix(&raw, self.channels);
         resample(&mono, self.sample_rate, TARGET_RATE)
     }

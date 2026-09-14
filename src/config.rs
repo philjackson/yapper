@@ -22,6 +22,9 @@ pub struct Config {
     pub type_on_finish: bool,
     /// How many past transcripts to keep. Older ones fall off the end.
     pub history_limit: usize,
+    /// Show a running transcript while you talk. Costs a re-transcription
+    /// every half second, so it wants a GPU build to feel free.
+    pub live_preview: bool,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             copy_to_clipboard: true,
             type_on_finish: false,
             history_limit: 200,
+            live_preview: true,
         }
     }
 }
