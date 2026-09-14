@@ -16,6 +16,7 @@ use crate::audio::Recorder;
 use crate::cli::Options;
 use crate::config::Config;
 use crate::history::{Entry, History, relative_time};
+use crate::preferences;
 use crate::output;
 use crate::stage::Bars;
 use crate::transcribe::{self, Event, Worker};
@@ -45,7 +46,7 @@ enum State {
 }
 
 struct App {
-    config: Config,
+    config: RefCell<Config>,
     /// Quick capture: record on open, copy on close, then exit.
     quick: bool,
     /// Set once we've decided to exit, so the close handler stops intervening.
@@ -254,6 +255,16 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
             )
             .build();
 
+        let menu = gtk::gio::Menu::new();
+        menu.append(Some("Preferences"), Some("win.preferences"));
+        header.pack_end(
+            &gtk::MenuButton::builder()
+                .icon_name("open-menu-symbolic")
+                .tooltip_text("Main menu")
+                .menu_model(&menu)
+                .build(),
+        );
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&toasts));
@@ -261,7 +272,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     }
 
     let app_state = Rc::new(App {
-        config,
+        config: RefCell::new(config),
         quick: options.quick,
         quitting: Cell::new(false),
         app: app.clone(),
@@ -398,6 +409,16 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         }
     });
 
+    if !options.quick {
+        let preferences = gtk::gio::SimpleAction::new("preferences", None);
+        preferences.connect_activate({
+            let app_state = Rc::clone(&app_state);
+            move |_, _| app_state.show_preferences()
+        });
+        window.add_action(&preferences);
+        app.set_accels_for_action("win.preferences", &["<Control>comma"]);
+    }
+
     install_shortcuts(&window, &app_state);
     install_signal_handler();
 
@@ -431,7 +452,7 @@ impl App {
                 self.show_preview("");
                 // Claim the space now rather than letting the window jump when
                 // the first preview arrives a second or two later.
-                self.preview_label.set_visible(self.config.live_preview);
+                self.preview_label.set_visible(self.config.borrow().live_preview);
                 self.set_state(State::Recording);
                 self.start_animating();
             }
@@ -466,7 +487,7 @@ impl App {
 
     /// Ask for a refreshed running transcript, unless one is already being made.
     fn request_preview(self: &Rc<Self>) {
-        if !self.config.live_preview || self.preview_pending.get() {
+        if !self.config.borrow().live_preview || self.preview_pending.get() {
             return;
         }
         let Some(samples) = self
@@ -533,12 +554,12 @@ impl App {
                 }
                 // Copying is the whole point of quick capture, whatever the
                 // config says about the normal window.
-                if (self.config.copy_to_clipboard || self.quick)
+                if (self.config.borrow().copy_to_clipboard || self.quick)
                     && let Err(err) = output::copy(&text)
                 {
                     self.report(&format!("Copy failed: {err}"));
                 }
-                if self.config.type_on_finish
+                if self.config.borrow().type_on_finish
                     && let Err(err) = output::type_text(&text)
                 {
                     self.report(&format!("{err}"));
@@ -797,6 +818,32 @@ impl App {
             "error",
             matches!(state, State::Broken(_)),
         );
+    }
+
+    fn show_preferences(self: &Rc<Self>) {
+        let app_state = Rc::clone(self);
+        preferences::present(
+            &self.window,
+            &self.config.borrow().clone(),
+            Rc::new(move |config| app_state.apply_config(config)),
+        );
+    }
+
+    /// Take on preferences edited in the dialog. Everything is live except the
+    /// model, which was loaded when the worker started.
+    fn apply_config(self: &Rc<Self>, config: &Config) {
+        let previous_limit = self.config.borrow().history_limit;
+        *self.config.borrow_mut() = config.clone();
+        self.worker
+            .apply(transcribe::Settings::from_config(config));
+
+        if config.history_limit != previous_limit {
+            *self.history.borrow_mut() = History::load(config.history_limit);
+            self.rebuild_list(None);
+        }
+        if !config.live_preview {
+            self.show_preview("");
+        }
     }
 
     fn toast(&self, message: &str) {

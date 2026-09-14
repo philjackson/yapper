@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod history;
 mod output;
+mod preferences;
 mod stage;
 mod transcribe;
 mod ui;

@@ -129,7 +129,15 @@ bind = SUPER, SHIFT, D, exec, pkill -USR1 yapper || yapper
 
 ## Configuration
 
-Written on first run to `~/.config/yapper/config.toml`:
+Everything is in the preferences dialog — the menu in the header bar, or
+`Ctrl+,`. Changes save as you make them and take effect on the next
+transcription, except the model, which is loaded once at startup.
+
+<p align="center">
+  <img src="docs/preferences.png" alt="The preferences dialog, showing transcription, output and window settings" width="440">
+</p>
+
+The same settings live in `~/.config/yapper/config.toml`, written on first run:
 
 ```toml
 model_path = "/home/you/.local/share/yapper/models/ggml-base.en.bin"

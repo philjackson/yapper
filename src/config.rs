@@ -1,6 +1,6 @@
 //! User configuration, read from `~/.config/yapper/config.toml`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -45,24 +45,31 @@ impl Default for Config {
 impl Config {
     /// Load the config file, creating it with defaults on first run.
     pub fn load() -> Result<Self> {
-        let path = config_path();
+        Self::load_from(&config_path())
+    }
+
+    /// As [`Self::load`], but against a given file. Tests use this.
+    pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
-            let cfg = Config::default();
-            cfg.save()?;
-            return Ok(cfg);
+            let config = Config::default();
+            config.save_to(path)?;
+            return Ok(config);
         }
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = config_path();
+        self.save_to(&config_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
     }
 
     /// `None` means "auto-detect", which is what whisper.cpp expects.
@@ -99,4 +106,76 @@ pub fn models_dir() -> PathBuf {
 
 fn default_model_path() -> PathBuf {
     models_dir().join("ggml-base.en.bin")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("yapper-config-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("config.toml")
+    }
+
+    #[test]
+    fn settings_survive_a_save_and_reload() {
+        let path = scratch("roundtrip");
+        let config = Config {
+            language: "de".into(),
+            translate: true,
+            threads: 6,
+            copy_to_clipboard: false,
+            live_preview: false,
+            history_limit: 42,
+            ..Default::default()
+        };
+        config.save_to(&path).unwrap();
+
+        let reloaded = Config::load_from(&path).unwrap();
+        assert_eq!(reloaded.language, "de");
+        assert!(reloaded.translate);
+        assert_eq!(reloaded.threads, 6);
+        assert!(!reloaded.copy_to_clipboard);
+        assert!(!reloaded.live_preview);
+        assert_eq!(reloaded.history_limit, 42);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_missing_file_is_written_with_the_defaults() {
+        let path = scratch("firstrun");
+        std::fs::remove_file(&path).ok();
+        let config = Config::load_from(&path).unwrap();
+        assert!(path.exists(), "first run should write the file");
+        assert_eq!(config.language, "auto");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_older_file_keeps_its_settings_and_gains_the_new_ones() {
+        // Fields yapper no longer knows about are ignored, and ones it has
+        // since gained fall back to their defaults rather than failing to load.
+        let path = scratch("older");
+        std::fs::write(
+            &path,
+            "language = \"fr\"\ntranslate = true\nappend_transcripts = true\n",
+        )
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.language, "fr");
+        assert!(config.translate);
+        assert_eq!(config.history_limit, Config::default().history_limit);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn auto_and_empty_both_mean_detect_the_language() {
+        let mut config = Config::default();
+        assert_eq!(config.language_code(), None);
+        config.language = String::new();
+        assert_eq!(config.language_code(), None);
+        config.language = "en".into();
+        assert_eq!(config.language_code(), Some("en"));
+    }
 }

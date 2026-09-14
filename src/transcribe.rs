@@ -5,8 +5,8 @@
 //! that GTK's main loop can await without blocking.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -33,15 +33,41 @@ pub enum Event {
     Failed(String),
 }
 
+/// The settings a running worker consults for each job. Held behind a lock so
+/// preferences take effect on the next transcription rather than on restart.
+#[derive(Clone)]
+pub struct Settings {
+    pub language: Option<String>,
+    pub threads: i32,
+    pub translate: bool,
+}
+
+impl Settings {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            language: config.language_code().map(str::to_owned),
+            threads: config.thread_count(),
+            translate: config.translate,
+        }
+    }
+}
+
 pub struct Worker {
     pub requests: async_channel::Sender<Request>,
     pub events: async_channel::Receiver<Event>,
+    settings: Arc<Mutex<Settings>>,
     /// Raised when the real transcription is queued, so a preview still running
     /// gives up its slice of the GPU instead of delaying the text that counts.
     interrupt: Arc<AtomicBool>,
 }
 
 impl Worker {
+    /// Apply changed preferences. The model itself is loaded once at startup,
+    /// so a different model still needs a restart; everything else is per-job.
+    pub fn apply(&self, settings: Settings) {
+        *self.settings.lock().unwrap() = settings;
+    }
+
     /// Send the final audio, cutting short any preview in flight.
     pub fn transcribe(&self, samples: Vec<f32>) -> Result<()> {
         self.interrupt.store(true, Ordering::Relaxed);
@@ -64,11 +90,10 @@ pub fn spawn(config: &Config) -> Worker {
     let (event_tx, event_rx) = async_channel::unbounded::<Event>();
     let interrupt = Arc::new(AtomicBool::new(false));
     let worker_interrupt = Arc::clone(&interrupt);
+    let settings = Arc::new(Mutex::new(Settings::from_config(config)));
+    let worker_settings = Arc::clone(&settings);
 
     let model_path = config.model_path.clone();
-    let language = config.language_code().map(str::to_owned);
-    let threads = config.thread_count();
-    let translate = config.translate;
 
     std::thread::Builder::new()
         .name("whisper".into())
@@ -91,6 +116,11 @@ pub fn spawn(config: &Config) -> Worker {
                         if worker_interrupt.load(Ordering::Relaxed) {
                             continue;
                         }
+                        let Settings {
+                            language,
+                            threads,
+                            translate,
+                        } = worker_settings.lock().unwrap().clone();
                         let abort = Arc::clone(&worker_interrupt);
                         let text = run(
                             &context,
@@ -109,6 +139,11 @@ pub fn spawn(config: &Config) -> Worker {
                     }
                     Request::Transcribe(samples) => {
                         worker_interrupt.store(false, Ordering::Relaxed);
+                        let Settings {
+                            language,
+                            threads,
+                            translate,
+                        } = worker_settings.lock().unwrap().clone();
                         let _ = event_tx.send_blocking(Event::Transcribing);
                         let event = match run(
                             &context,
@@ -131,6 +166,7 @@ pub fn spawn(config: &Config) -> Worker {
     Worker {
         requests: request_tx,
         events: event_rx,
+        settings,
         interrupt,
     }
 }
