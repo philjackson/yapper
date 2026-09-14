@@ -6,7 +6,7 @@ nothing leaves the box.
 
 Inspired by [waystt](https://github.com/sevos/waystt), but with a window.
 
-[**Download the latest release**](https://github.com/philjackson/yapper/releases/latest)
+[Download the latest release](https://github.com/philjackson/yapper/releases/latest)
 · [all releases](https://github.com/philjackson/yapper/releases)
 
 > **Written by AI.** Claude wrote the code, the tests and this README from my
