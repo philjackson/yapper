@@ -22,7 +22,7 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            git rust cargo cmake clang \
+            git github-cli rust cargo cmake clang \
             gtk4 libadwaita gtk4-layer-shell \
             alsa-lib \
             vulkan-headers vulkan-icd-loader shaderc
@@ -60,7 +60,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # --repo rather than relying on git detection: the checkout is owned
+          # by a different uid inside the container and git baulks at it.
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
             --notes "Built on Arch with Vulkan. Needs GTK4, libadwaita, gtk4-layer-shell, wl-clipboard and a Vulkan loader at runtime, plus a Whisper model — see the README." \
