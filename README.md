@@ -10,14 +10,21 @@ the machine and no API key is needed.
              Listening  0:04
         Ctrl+Space or Escape to stop
  ┌──────────────────────────────────┐
- │ the transcript lands here         │
+ │ Remind me to pick up the...  0:04│
+ │ 4 minutes ago                    │
+ ├──────────────────────────────────┤
+ │ Meeting notes: we agreed...  0:26│
+ │ 5 hours ago                      │
  └──────────────────────────────────┘
-              Clear  Type  Copy
+ (delete)                (type)(copy)
 ```
 
 The bars react to the microphone while you talk and settle into a still shape
 when you stop — at which point the animation stops too, so an idle window costs
 nothing. Colours follow the desktop's accent and light/dark preference.
+
+Every transcript is kept, newest first. The buttons act on whatever row is
+selected.
 
 ## Build
 
@@ -44,6 +51,8 @@ cargo build --release --features vulkan   # or --features cuda
 | Stop recording | `Escape` |
 | Toggle from anywhere | `pkill -USR1 yapper` |
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
+| Copy an older one | Select its row and press `Enter`, double-click it, or use the copy button |
+| Delete one | Select its row and press `Delete`, or use the trash button |
 
 Bind the signal to a key in Hyprland so the window doesn't need focus:
 
@@ -65,7 +74,7 @@ translate = false          # translate to English instead of transcribing
 threads = 0                # 0 = pick from the CPU count
 copy_to_clipboard = true
 type_on_finish = false     # type straight into the focused window
-append_transcripts = true  # keep earlier transcripts in the window
+history_limit = 200        # how many past transcripts to keep
 ```
 
 Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
@@ -82,11 +91,25 @@ Bigger models are more accurate and slower: `tiny.en` (75 MB), `base.en`
 | `src/stage.rs` | The bars behind the button: layout, easing, and drawing |
 | `src/style.css` | The button, status text and transcript frame |
 | `src/output.rs` | Clipboard via `wl-copy`, typing via `wtype`/`ydotool` |
+| `src/history.rs` | Past transcripts on disk, and the "5 minutes ago" labels |
 | `src/config.rs` | `config.toml` handling |
+
+## Where things live
+
+| What | Where |
+| --- | --- |
+| Settings | `~/.config/yapper/config.toml` |
+| Models | `~/.local/share/yapper/models/` |
+| Transcript history | `~/.local/state/yapper/history.jsonl` |
+
+History is JSON Lines — one transcript per line, so it stays greppable and a
+single damaged line costs you that entry rather than the file. Only the text is
+kept; the audio is discarded once it has been transcribed.
 
 ## Not done yet
 
 - Streaming transcription (audio is currently sent to Whisper once recording stops)
 - A tray icon or a layer-shell overlay instead of a normal window
 - Preferences UI — the config file is the only way to change settings
+- Searching or editing past transcripts, and keeping the audio alongside them
 - Proper voice activity detection (there is only a crude RMS gate that skips silent clips)

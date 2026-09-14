@@ -80,14 +80,27 @@
   font-size: 0.9em;
 }
 
-.transcript-frame {
-  border-radius: 12px;
-  background-color: alpha(currentColor, 0.05);
+/* The history list. Adwaita's boxed-list does most of the work; this only
+   gives the rows a little more room to breathe and keeps the transcript itself
+   the most legible thing in the row. */
+.boxed-list row.activatable {
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 
-.transcript,
-.transcript text {
-  background: transparent;
-  font-size: 1.05em;
-  line-height: 1.45;
+.boxed-list row title {
+  font-size: 1.02em;
+}
+
+/* The round action buttons under the list. Neutral until you reach for them,
+   so the list stays the loudest thing on the page. */
+button.circular {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+
+button.circular.delete:hover {
+  background-color: #e0333c;
+  color: #ffffff;
 }

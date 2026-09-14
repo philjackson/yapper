@@ -2,6 +2,7 @@
 
 mod audio;
 mod config;
+mod history;
 mod output;
 mod stage;
 mod transcribe;

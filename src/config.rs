@@ -20,8 +20,8 @@ pub struct Config {
     pub copy_to_clipboard: bool,
     /// Type the transcript into the focused window (needs wtype or ydotool).
     pub type_on_finish: bool,
-    /// Keep earlier transcripts in the window instead of replacing them.
-    pub append_transcripts: bool,
+    /// How many past transcripts to keep. Older ones fall off the end.
+    pub history_limit: usize,
 }
 
 impl Default for Config {
@@ -33,7 +33,7 @@ impl Default for Config {
             threads: 0,
             copy_to_clipboard: true,
             type_on_finish: false,
-            append_transcripts: true,
+            history_limit: 200,
         }
     }
 }

@@ -1,5 +1,5 @@
 //! The window: a round record button with a row of bars dancing behind it, the
-//! current status underneath, and the transcript below that.
+//! current status underneath, and the list of past transcripts below that.
 //!
 //! Everything here runs on the GTK main thread; recording and inference happen
 //! elsewhere and report back over channels.
@@ -14,6 +14,7 @@ use gtk::glib;
 
 use crate::audio::Recorder;
 use crate::config::Config;
+use crate::history::{Entry, History, relative_time};
 use crate::output;
 use crate::stage::Bars;
 use crate::transcribe::{self, Event, Request};
@@ -21,6 +22,8 @@ use crate::transcribe::{self, Event, Request};
 /// How often the SIGUSR1 flag and the recording clock are checked. The
 /// animation runs off the frame clock instead, so this can stay lazy.
 const POLL: Duration = Duration::from_millis(100);
+/// How often "just now" is allowed to become "2 minutes ago".
+const RESTAMP: Duration = Duration::from_secs(30);
 
 #[derive(Clone, PartialEq)]
 enum State {
@@ -37,6 +40,13 @@ struct App {
     config: Config,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
+    history: RefCell<History>,
+    /// Rows in the same order as the history, so a selected row's index is an
+    /// index into the entries.
+    rows: RefCell<Vec<adw::ActionRow>>,
+    /// Length of the clip currently being transcribed. Inference is serialised,
+    /// so one slot is enough to pair a transcript with its recording.
+    pending_duration: Cell<f32>,
     bars: RefCell<Bars>,
     /// Frame clock timestamp of the previous animation frame, in microseconds.
     last_frame: Cell<i64>,
@@ -53,21 +63,25 @@ struct App {
     mic_pages: gtk::Stack,
     status_label: gtk::Label,
     hint_label: gtk::Label,
-    transcript: gtk::TextView,
+    list: gtk::ListBox,
+    list_pages: gtk::Stack,
+    empty_page: adw::StatusPage,
     copy_button: gtk::Button,
     type_button: gtk::Button,
+    delete_button: gtk::Button,
 }
 
 pub fn build(app: &adw::Application, config: Config) {
     load_css();
 
     let worker = transcribe::spawn(&config);
+    let history = History::load(config.history_limit);
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("yapper")
         .default_width(560)
-        .default_height(620)
+        .default_height(640)
         .build();
 
     // --- The stage: bars behind, button on top -----------------------------
@@ -80,7 +94,10 @@ pub fn build(app: &adw::Application, config: Config) {
 
     let mic_icon = gtk::Image::from_icon_name("audio-input-microphone-symbolic");
     mic_icon.set_pixel_size(46);
-    let spinner = adw::Spinner::builder().width_request(42).height_request(42).build();
+    let spinner = adw::Spinner::builder()
+        .width_request(42)
+        .height_request(42)
+        .build();
 
     let mic_pages = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
@@ -102,7 +119,7 @@ pub fn build(app: &adw::Application, config: Config) {
     overlay.add_overlay(&mic_button);
     overlay.set_measure_overlay(&mic_button, true);
 
-    // --- Status and transcript ---------------------------------------------
+    // --- Status ------------------------------------------------------------
 
     let status_label = gtk::Label::builder()
         .label("Loading model\u{2026}")
@@ -114,39 +131,55 @@ pub fn build(app: &adw::Application, config: Config) {
         .css_classes(["hint", "dim-label"])
         .build();
 
-    let transcript = gtk::TextView::builder()
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .left_margin(14)
-        .right_margin(14)
-        .top_margin(12)
-        .bottom_margin(12)
-        .css_classes(["transcript"])
+    // --- History list ------------------------------------------------------
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .css_classes(["boxed-list"])
+        .valign(gtk::Align::Start)
+        .margin_top(2)
+        .margin_bottom(2)
         .build();
-    let transcript_scroll = gtk::ScrolledWindow::builder()
+
+    let list_scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
-        .css_classes(["transcript-frame"])
-        .child(&transcript)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&list)
         .build();
 
-    let copy_button = gtk::Button::builder().label("Copy").sensitive(false).build();
-    let type_button = gtk::Button::builder()
-        .label("Type")
-        .sensitive(false)
-        .tooltip_text(match output::typing_backend() {
-            Some(tool) => format!("Type into the focused window using {tool}"),
+    let empty_page = adw::StatusPage::builder()
+        .icon_name("audio-input-microphone-symbolic")
+        .title("No recordings yet")
+        .description("Press the microphone, or Ctrl+Space, to make one")
+        .vexpand(true)
+        .css_classes(["compact"])
+        .build();
+
+    let list_pages = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(150)
+        .vexpand(true)
+        .build();
+    list_pages.add_named(&empty_page, Some("empty"));
+    list_pages.add_named(&list_scroll, Some("list"));
+
+    let delete_button = icon_button("user-trash-symbolic", "Delete the selected recording");
+    delete_button.add_css_class("delete");
+    let type_button = icon_button(
+        "input-keyboard-symbolic",
+        &match output::typing_backend() {
+            Some(tool) => format!("Type the selected transcript using {tool}"),
             None => "Install wtype or ydotool to type into the focused window".to_string(),
-        })
-        .build();
-    let clear_button = gtk::Button::builder().label("Clear").build();
+        },
+    );
+    let copy_button = icon_button("edit-copy-symbolic", "Copy the selected transcript");
 
-    let actions = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(6)
-        .halign(gtk::Align::End)
-        .build();
-    actions.append(&clear_button);
-    actions.append(&type_button);
-    actions.append(&copy_button);
+    let actions = gtk::CenterBox::builder().margin_top(4).build();
+    actions.set_start_widget(Some(&delete_button));
+    let right = gtk::Box::builder().spacing(8).build();
+    right.append(&type_button);
+    right.append(&copy_button);
+    actions.set_end_widget(Some(&right));
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -159,7 +192,7 @@ pub fn build(app: &adw::Application, config: Config) {
     content.append(&overlay);
     content.append(&status_label);
     content.append(&hint_label);
-    content.append(&transcript_scroll);
+    content.append(&list_pages);
     content.append(&actions);
 
     let toasts = adw::ToastOverlay::new();
@@ -167,7 +200,12 @@ pub fn build(app: &adw::Application, config: Config) {
 
     let header = adw::HeaderBar::builder()
         .css_classes(["flat"])
-        .title_widget(&gtk::Label::builder().label("yapper").css_classes(["title"]).build())
+        .title_widget(
+            &gtk::Label::builder()
+                .label("yapper")
+                .css_classes(["title"])
+                .build(),
+        )
         .build();
 
     let toolbar = adw::ToolbarView::new();
@@ -179,6 +217,9 @@ pub fn build(app: &adw::Application, config: Config) {
         config,
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
+        history: RefCell::new(history),
+        rows: RefCell::new(Vec::new()),
+        pending_duration: Cell::new(0.0),
         bars: RefCell::new(Bars::new()),
         last_frame: Cell::new(0),
         first_frame: Cell::new(0),
@@ -191,12 +232,16 @@ pub fn build(app: &adw::Application, config: Config) {
         mic_pages,
         status_label,
         hint_label,
-        transcript: transcript.clone(),
+        list: list.clone(),
+        list_pages,
+        empty_page,
         copy_button: copy_button.clone(),
         type_button: type_button.clone(),
+        delete_button: delete_button.clone(),
     });
 
     app_state.refresh_status();
+    app_state.rebuild_list(None);
 
     mic_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
@@ -205,28 +250,36 @@ pub fn build(app: &adw::Application, config: Config) {
 
     copy_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
-        move |_| {
-            let text = app_state.transcript_text();
-            match output::copy(&text) {
-                Ok(()) => app_state.toast("Copied to clipboard"),
-                Err(err) => app_state.toast(&format!("Copy failed: {err}")),
-            }
-        }
+        move |_| app_state.copy_selected()
     });
 
     type_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
         move |_| {
-            let text = app_state.transcript_text();
-            if let Err(err) = output::type_text(&text) {
+            let Some(entry) = app_state.selected_entry() else {
+                return;
+            };
+            if let Err(err) = output::type_text(&entry.text) {
                 app_state.toast(&format!("{err}"));
             }
         }
     });
 
-    clear_button.connect_clicked({
+    delete_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
-        move |_| app_state.set_transcript("")
+        move |_| app_state.delete_selected()
+    });
+
+    list.connect_row_selected({
+        let app_state = Rc::clone(&app_state);
+        move |_, _| app_state.update_action_buttons()
+    });
+
+    // Enter or a double click on a row copies it, which is what you almost
+    // always want the history for.
+    list.connect_row_activated({
+        let app_state = Rc::clone(&app_state);
+        move |_, _| app_state.copy_selected()
     });
 
     stage.set_draw_func({
@@ -248,6 +301,15 @@ pub fn build(app: &adw::Application, config: Config) {
         let app_state = Rc::clone(&app_state);
         move || {
             app_state.poll();
+            glib::ControlFlow::Continue
+        }
+    });
+
+    // Relative timestamps drift out of date on their own.
+    glib::timeout_add_local(RESTAMP, {
+        let app_state = Rc::clone(&app_state);
+        move || {
+            app_state.restamp_rows();
             glib::ControlFlow::Continue
         }
     });
@@ -305,6 +367,8 @@ impl App {
             return;
         }
 
+        self.pending_duration
+            .set(samples.len() as f32 / crate::audio::TARGET_RATE as f32);
         self.set_state(State::Working);
         if self
             .requests
@@ -317,9 +381,18 @@ impl App {
 
     fn handle_event(self: &Rc<Self>, event: Event) {
         match event {
-            Event::ModelReady => self.set_state(State::Idle),
+            Event::ModelReady => {
+                self.set_state(State::Idle);
+                // The list grabs focus while the button is still insensitive,
+                // and a focused list selects its first row. Hand focus to the
+                // button now that it can take it, so nothing starts selected.
+                self.mic_button.grab_focus();
+                self.list.unselect_all();
+                self.update_action_buttons();
+            }
             Event::ModelFailed(err) => {
-                self.set_transcript(&err);
+                self.empty_page.set_title("Model unavailable");
+                self.empty_page.set_description(Some(&err));
                 self.set_state(State::Broken("model failed to load".into()));
             }
             Event::Transcribing => self.set_state(State::Working),
@@ -329,7 +402,6 @@ impl App {
                     self.toast("No speech detected");
                     return;
                 }
-                self.append_transcript(&text);
                 if self.config.copy_to_clipboard
                     && let Err(err) = output::copy(&text)
                 {
@@ -340,12 +412,118 @@ impl App {
                 {
                     self.toast(&format!("{err}"));
                 }
+                self.remember(text);
             }
             Event::Failed(err) => {
                 self.set_state(State::Idle);
                 self.toast(&format!("Transcription failed: {err}"));
             }
         }
+    }
+
+    /// Add a finished transcript to the history and select it.
+    fn remember(self: &Rc<Self>, text: String) {
+        let duration = self.pending_duration.replace(0.0);
+        if let Err(err) = self.history.borrow_mut().add(text, duration) {
+            self.toast(&format!("Could not save the recording: {err}"));
+        }
+        // The newest entry is always first, so the new row is index 0.
+        self.rebuild_list(Some(0));
+    }
+
+    fn selected_entry(&self) -> Option<Entry> {
+        let index = self.list.selected_row()?.index();
+        self.history
+            .borrow()
+            .entries()
+            .get(index as usize)
+            .cloned()
+    }
+
+    fn copy_selected(self: &Rc<Self>) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        match output::copy(&entry.text) {
+            Ok(()) => self.toast("Copied to clipboard"),
+            Err(err) => self.toast(&format!("Copy failed: {err}")),
+        }
+    }
+
+    fn delete_selected(self: &Rc<Self>) {
+        let Some(row) = self.list.selected_row() else {
+            return;
+        };
+        let index = row.index() as usize;
+        let Some(entry) = self.history.borrow().entries().get(index).cloned() else {
+            return;
+        };
+
+        match self.history.borrow_mut().remove(entry.id) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                self.toast(&format!("Could not delete the recording: {err}"));
+                return;
+            }
+        }
+
+        // Keep the selection where the eye already is: the row that slid up
+        // into the deleted one's place, or the new last row.
+        let remaining = self.history.borrow().entries().len();
+        let next = if remaining == 0 {
+            None
+        } else {
+            Some(index.min(remaining - 1))
+        };
+        self.rebuild_list(next);
+        self.toast("Recording deleted");
+    }
+
+    fn rebuild_list(self: &Rc<Self>, select: Option<usize>) {
+        while let Some(child) = self.list.first_child() {
+            self.list.remove(&child);
+        }
+
+        let rows: Vec<adw::ActionRow> = self
+            .history
+            .borrow()
+            .entries()
+            .iter()
+            .map(build_row)
+            .collect();
+        for row in &rows {
+            self.list.append(row);
+        }
+        let empty = rows.is_empty();
+        *self.rows.borrow_mut() = rows;
+
+        self.list_pages
+            .set_visible_child_name(if empty { "empty" } else { "list" });
+
+        if let Some(index) = select
+            && let Some(row) = self.list.row_at_index(index as i32)
+        {
+            self.list.select_row(Some(&row));
+        }
+        self.update_action_buttons();
+    }
+
+    /// Refresh the "5 minutes ago" subtitles in place, so the selection and the
+    /// scroll position survive.
+    fn restamp_rows(self: &Rc<Self>) {
+        let history = self.history.borrow();
+        for (row, entry) in self.rows.borrow().iter().zip(history.entries()) {
+            row.set_subtitle(&relative_time(entry.recorded_at()));
+        }
+    }
+
+    fn update_action_buttons(&self) {
+        let selected = self.list.selected_row().is_some();
+        self.copy_button.set_sensitive(selected);
+        self.delete_button.set_sensitive(selected);
+        self.type_button
+            .set_sensitive(selected && output::typing_backend().is_some());
     }
 
     /// Install the tick callback, unless one is already running.
@@ -449,7 +627,13 @@ impl App {
                 true,
                 false,
             ),
-            State::Broken(err) => (err.clone(), "See the transcript for details", "Unavailable", false, false),
+            State::Broken(err) => (
+                err.clone(),
+                "See below for details",
+                "Unavailable",
+                false,
+                false,
+            ),
         };
 
         self.status_label.set_label(&status);
@@ -462,53 +646,45 @@ impl App {
         let recording = matches!(state, State::Recording);
         set_css_class(&self.mic_button, "recording", recording);
         set_css_class(&self.status_label, "recording", recording);
-        set_css_class(&self.status_label, "error", matches!(state, State::Broken(_)));
-    }
-
-    fn transcript_text(&self) -> String {
-        let buffer = self.transcript.buffer();
-        buffer
-            .text(&buffer.start_iter(), &buffer.end_iter(), false)
-            .to_string()
-    }
-
-    fn set_transcript(self: &Rc<Self>, text: &str) {
-        self.transcript.buffer().set_text(text);
-        self.update_action_buttons();
-    }
-
-    fn append_transcript(self: &Rc<Self>, text: &str) {
-        if !self.config.append_transcripts {
-            self.set_transcript(text);
-            return;
-        }
-        let buffer = self.transcript.buffer();
-        let mut end = buffer.end_iter();
-        if buffer.char_count() > 0 {
-            buffer.insert(&mut end, "\n\n");
-        }
-        buffer.insert(&mut end, text);
-        self.update_action_buttons();
-        // Keep the newest text in view.
-        self.transcript.scroll_to_mark(
-            &buffer.create_mark(None, &buffer.end_iter(), false),
-            0.0,
-            false,
-            0.0,
-            1.0,
+        set_css_class(
+            &self.status_label,
+            "error",
+            matches!(state, State::Broken(_)),
         );
-    }
-
-    fn update_action_buttons(&self) {
-        let has_text = self.transcript.buffer().char_count() > 0;
-        self.copy_button.set_sensitive(has_text);
-        self.type_button
-            .set_sensitive(has_text && output::typing_backend().is_some());
     }
 
     fn toast(&self, message: &str) {
         self.toasts.add_toast(adw::Toast::new(message));
     }
+}
+
+fn build_row(entry: &Entry) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        // Transcripts are arbitrary text, so they are never markup.
+        .use_markup(false)
+        .title(entry.summary())
+        .subtitle(relative_time(entry.recorded_at()))
+        .title_lines(2)
+        .subtitle_lines(1)
+        .activatable(true)
+        .build();
+
+    let duration = gtk::Label::builder()
+        .label(entry.duration_label())
+        .css_classes(["dim-label", "numeric"])
+        .valign(gtk::Align::Center)
+        .build();
+    row.add_suffix(&duration);
+    row
+}
+
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    gtk::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .sensitive(false)
+        .css_classes(["circular"])
+        .build()
 }
 
 fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, wanted: bool) {
@@ -572,6 +748,18 @@ fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
     controller.add_shortcut(gtk::Shortcut::new(
         gtk::ShortcutTrigger::parse_string("Escape"),
         Some(stop),
+    ));
+
+    let delete = gtk::CallbackAction::new({
+        let app_state = Rc::clone(app_state);
+        move |_, _| {
+            app_state.delete_selected();
+            glib::Propagation::Stop
+        }
+    });
+    controller.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("Delete"),
+        Some(delete),
     ));
 
     window.add_controller(controller);
