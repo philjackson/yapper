@@ -31,7 +31,8 @@ OPTIONS:
 
 While running:
     Ctrl+Space       Start or stop recording
-    Escape           Stop recording (quick capture: stop, copy and close)
+    Enter / Space    Finish recording and keep the transcript
+    Escape           Discard the recording (quick capture: close)
     Ctrl+C           Copy the selected recording
     Delete           Delete the selected recording
 

@@ -480,6 +480,11 @@ impl App {
 
         self.pending_duration
             .set(samples.len() as f32 / crate::audio::TARGET_RATE as f32);
+        // Quick capture is done with the screen the moment you finish; the
+        // process stays up only long enough to copy.
+        if self.quick {
+            self.window.set_visible(false);
+        }
         // Any preview still running is now pointless; the worker drops it.
         self.preview_pending.set(false);
         self.set_state(State::Working);
@@ -511,6 +516,26 @@ impl App {
         let text = tail(text, PREVIEW_CHARS);
         self.preview_label.set_visible(!text.is_empty());
         self.preview_label.set_label(&text);
+    }
+
+    /// Throw the recording away: no transcription, no clipboard, no history.
+    /// The only way to lose audio on purpose, which is why it is a key of its
+    /// own rather than something a stray close does.
+    fn cancel_recording(self: &Rc<Self>) {
+        let Some(recorder) = self.recorder.borrow_mut().take() else {
+            return;
+        };
+        drop(recorder);
+        self.show_preview("");
+        self.preview_label.set_visible(false);
+        self.preview_pending.set(false);
+        self.set_state(State::Idle);
+
+        if self.quick {
+            self.quit();
+        } else {
+            self.toast("Recording discarded");
+        }
     }
 
     fn handle_event(self: &Rc<Self>, event: Event) {
@@ -768,11 +793,7 @@ impl App {
                 (timeout - silence).max(0.0)
             );
         }
-        if self.quick {
-            "Escape to stop and copy".to_string()
-        } else {
-            "Ctrl+Space or Escape to stop".to_string()
-        }
+        "Enter to finish \u{00b7} Escape to discard".to_string()
     }
 
     /// Picks up SIGUSR1 and keeps the recording clock honest.
@@ -835,8 +856,8 @@ impl App {
             ),
             State::Recording => (
                 "Listening  0:00".to_string(),
-                "Ctrl+Space or Escape to stop",
-                "Stop recording (Escape)",
+                "Enter to finish \u{00b7} Escape to discard",
+                "Finish recording (Enter)",
                 false,
                 true,
             ),
@@ -917,15 +938,16 @@ impl App {
         }
     }
 
-    /// Finish a quick capture: hide the panel at once, but stay alive until any
-    /// transcription in flight has landed on the clipboard.
+    /// Close a quick capture panel. On a layer surface Escape arrives as a
+    /// close rather than a key we can intercept, so closing means the same
+    /// thing Escape does: discard. Enter is how a recording is kept.
+    ///
+    /// A transcription already under way is not thrown away — the panel just
+    /// goes, and the process lives until the text reaches the clipboard.
     fn dismiss(self: &Rc<Self>) {
         let state = self.state.borrow().clone();
         match state {
-            State::Recording => {
-                self.stop_recording();
-                self.window.set_visible(false);
-            }
+            State::Recording => self.cancel_recording(),
             State::Working => self.window.set_visible(false),
             _ => self.quit(),
         }
@@ -962,7 +984,7 @@ fn float_above_everything(window: &adw::ApplicationWindow) {
 /// Quick capture has one way out, and the normal window's hints don't describe it.
 fn quick_hint(state: &State) -> &'static str {
     match state {
-        State::Recording => "Escape to stop and copy",
+        State::Recording => "Enter to finish \u{00b7} Escape to discard",
         State::Working => "Copying to the clipboard\u{2026}",
         State::Loading => "Loading model\u{2026}",
         _ => "Escape to close",
@@ -1061,23 +1083,41 @@ fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
         Some(toggle),
     ));
 
-    let stop = gtk::CallbackAction::new({
+    // Escape throws the recording away; Enter or Space keeps it. Two explicit
+    // endings, so neither can happen by accident.
+    let discard = gtk::CallbackAction::new({
         let app_state = Rc::clone(app_state);
         move |_, _| {
-            if app_state.quick {
-                // Escape is how a quick capture ends: stop, copy, close.
-                app_state.dismiss();
+            if matches!(*app_state.state.borrow(), State::Recording) {
+                app_state.cancel_recording();
                 return glib::Propagation::Stop;
             }
-            if matches!(*app_state.state.borrow(), State::Recording) {
-                app_state.stop_recording();
+            if app_state.quick {
+                app_state.dismiss();
+                return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
         }
     });
     controller.add_shortcut(gtk::Shortcut::new(
         gtk::ShortcutTrigger::parse_string("Escape"),
-        Some(stop),
+        Some(discard),
+    ));
+
+    let finish = gtk::CallbackAction::new({
+        let app_state = Rc::clone(app_state);
+        move |_, _| {
+            if matches!(*app_state.state.borrow(), State::Recording) {
+                app_state.stop_recording();
+                return glib::Propagation::Stop;
+            }
+            // Not recording: leave Enter and Space to the focused widget.
+            glib::Propagation::Proceed
+        }
+    });
+    controller.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("Return|KP_Enter|space"),
+        Some(finish),
     ));
 
     // Ctrl+C rather than Enter: it works wherever the focus happens to be, and
