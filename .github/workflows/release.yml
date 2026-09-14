@@ -1,8 +1,8 @@
 name: Release
 
 # Tag a commit and the binary shows up under Releases. The manual trigger runs
-# the same build without publishing anything, which is how you check a change
-# to this file before tagging.
+# the same build without publishing, which is how to check a change to this
+# file before tagging something for real.
 on:
   push:
     tags: ["v*"]
@@ -14,39 +14,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Built on Arch rather than the runner's Ubuntu: yapper needs libadwaita
+    # 1.6+ and gtk4-layer-shell, and Ubuntu 24.04 has neither. The trade is
+    # that the binary wants a rolling distro's glibc to run.
+    container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libasound2-dev \
-            libvulkan-dev \
-            glslc \
-            cmake \
-            clang \
-            libclang-dev \
-            meson \
-            ninja-build \
-            libwayland-dev \
-            wayland-protocols
+          pacman -Syu --noconfirm --needed \
+            git rust cargo cmake clang \
+            gtk4 libadwaita gtk4-layer-shell \
+            alsa-lib \
+            vulkan-headers vulkan-icd-loader shaderc
 
-      # Ubuntu only started packaging gtk4-layer-shell in 25.10, and the runner
-      # is on 24.04.
-      - name: Build gtk4-layer-shell
-        env:
-          VERSION: v1.3.0
-        run: |
-          git clone --depth 1 --branch "$VERSION" \
-            https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
-          cd /tmp/gtk4-layer-shell
-          meson setup build --prefix=/usr \
-            -Dintrospection=false -Dvapi=false -Dexamples=false -Ddocs=false -Dtests=false
-          ninja -C build
-          sudo ninja -C build install
+      - uses: actions/checkout@v4
 
       - name: Build
         run: cargo build --release --locked
@@ -58,12 +39,11 @@ jobs:
         id: package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          [ "$GITHUB_REF_TYPE" = tag ] || version="$(git rev-parse --short HEAD)"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="${GITHUB_SHA::7}"
           name="yapper-${version}-x86_64-linux"
 
           mkdir -p "dist/$name"
-          cp target/release/yapper "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
+          cp target/release/yapper README.md LICENSE "dist/$name/"
           cp -r data scripts "dist/$name/"
 
           tar -C dist -czf "dist/$name.tar.gz" "$name"
@@ -83,5 +63,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Built with Vulkan. Needs GTK4, libadwaita, gtk4-layer-shell and a Vulkan loader at runtime, plus a Whisper model — see the README." \
+            --notes "Built on Arch with Vulkan. Needs GTK4, libadwaita, gtk4-layer-shell, wl-clipboard and a Vulkan loader at runtime, plus a Whisper model — see the README." \
             dist/*.tar.gz dist/*.sha256
