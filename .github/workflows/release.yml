@@ -1,0 +1,70 @@
+name: Release
+
+# Tag a commit and the binary shows up under Releases. The manual trigger runs
+# the same build without publishing anything, which is how you check a change
+# to this file before tagging.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgtk4-layer-shell-dev \
+            libasound2-dev \
+            libvulkan-dev \
+            glslc \
+            cmake \
+            clang \
+            libclang-dev
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] || version="$(git rev-parse --short HEAD)"
+          name="yapper-${version}-x86_64-linux"
+
+          mkdir -p "dist/$name"
+          cp target/release/yapper "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp -r data scripts "dist/$name/"
+
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/*.tar.gz
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "Built with Vulkan. Needs GTK4, libadwaita, gtk4-layer-shell and a Vulkan loader at runtime, plus a Whisper model — see the README." \
+            dist/*.tar.gz dist/*.sha256
