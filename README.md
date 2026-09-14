@@ -82,6 +82,10 @@ Recording starts before the model has finished loading; the audio queues up
 behind it. That's the difference between a keybind that feels instant and one
 that doesn't.
 
+Because the panel is gone by the time the transcript lands, a desktop
+notification confirms it — "Copied 22 words to the clipboard". Copies from the
+normal window announce themselves the same way.
+
 Quick capture needs `wl-clipboard` installed. GTK's own clipboard is dropped
 when the process exits, which is precisely when you want the text — so yapper
 refuses to start in this mode without it rather than losing your words.
@@ -97,6 +101,7 @@ refuses to start in this mode without it rather than losing your words.
 | Reuse the text | Copied to the clipboard automatically; `Type` sends it to the focused window |
 | Copy an older one | Select its row and press `Enter`, double-click it, or use the copy button |
 | Delete one | Select its row and press `Delete`, or use the trash button |
+| Know it worked | Every copy raises a desktop notification with the word count |
 
 To drive a window that's already open from a key, bind the signal instead:
 
