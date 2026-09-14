@@ -39,11 +39,27 @@ cargo build --release
 ./target/release/yapper
 ```
 
-GPU inference is available as an opt-in feature if the SDK is installed:
+GPU inference is opt-in, because the backend has to be linked at build time and
+not every machine has the SDK for it:
 
 ```sh
 cargo build --release --features vulkan   # or --features cuda
 ```
+
+No code change is needed — whisper-rs turns `use_gpu` on by itself when a GPU
+feature is compiled in. Measured here on an RTX 5070 with `base.en`, taking an
+11-second clip:
+
+| | Model load | Per transcription |
+| --- | --- | --- |
+| CPU (default) | 33 ms | ~270 ms |
+| Vulkan | 174 ms | ~50 ms |
+
+So inference is roughly 5× faster, against a one-off 140 ms of extra startup.
+Worth it for a window you leave open, marginal for a single `--quick` capture at
+this model size, and worth more as the model gets bigger. The first run after
+building also compiles Vulkan shaders, which takes a few seconds and is then
+cached.
 
 ## Quick capture
 
