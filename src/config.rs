@@ -31,6 +31,9 @@ pub struct Config {
     /// Pause anything that is playing while you dictate, and start it again
     /// afterwards. Speakers bleed into the microphone.
     pub pause_players: bool,
+    /// Words to expect: names and jargon Whisper would otherwise guess at.
+    /// Passed to the model as context for every transcription.
+    pub initial_prompt: String,
 }
 
 impl Default for Config {
@@ -46,6 +49,7 @@ impl Default for Config {
             live_preview: true,
             silence_timeout: 0.0,
             pause_players: true,
+            initial_prompt: String::new(),
         }
     }
 }
@@ -78,6 +82,12 @@ impl Config {
         }
         let text = toml::to_string_pretty(self)?;
         std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Empty means no prompt at all, rather than an empty one.
+    pub fn prompt(&self) -> Option<&str> {
+        let prompt = self.initial_prompt.trim();
+        (!prompt.is_empty()).then_some(prompt)
     }
 
     /// `None` means "auto-detect", which is what whisper.cpp expects.
@@ -175,6 +185,16 @@ mod tests {
         assert!(config.translate);
         assert_eq!(config.history_limit, Config::default().history_limit);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_blank_prompt_is_no_prompt() {
+        let mut config = Config::default();
+        assert_eq!(config.prompt(), None);
+        config.initial_prompt = "   \n ".into();
+        assert_eq!(config.prompt(), None, "whitespace is not a prompt");
+        config.initial_prompt = "  Hyprland, libadwaita  ".into();
+        assert_eq!(config.prompt(), Some("Hyprland, libadwaita"));
     }
 
     #[test]

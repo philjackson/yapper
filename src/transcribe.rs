@@ -40,6 +40,7 @@ pub struct Settings {
     pub language: Option<String>,
     pub threads: i32,
     pub translate: bool,
+    pub prompt: Option<String>,
 }
 
 impl Settings {
@@ -48,6 +49,7 @@ impl Settings {
             language: config.language_code().map(str::to_owned),
             threads: config.thread_count(),
             translate: config.translate,
+            prompt: config.prompt().map(str::to_owned),
         }
     }
 }
@@ -120,6 +122,7 @@ pub fn spawn(config: &Config) -> Worker {
                             language,
                             threads,
                             translate,
+                            prompt,
                         } = worker_settings.lock().unwrap().clone();
                         let abort = Arc::clone(&worker_interrupt);
                         let text = run(
@@ -128,6 +131,7 @@ pub fn spawn(config: &Config) -> Worker {
                             language.as_deref(),
                             threads,
                             translate,
+                            prompt.as_deref(),
                             Some(Box::new(move || abort.load(Ordering::Relaxed))),
                         )
                         .unwrap_or_default();
@@ -143,6 +147,7 @@ pub fn spawn(config: &Config) -> Worker {
                             language,
                             threads,
                             translate,
+                            prompt,
                         } = worker_settings.lock().unwrap().clone();
                         let _ = event_tx.send_blocking(Event::Transcribing);
                         let event = match run(
@@ -151,6 +156,7 @@ pub fn spawn(config: &Config) -> Worker {
                             language.as_deref(),
                             threads,
                             translate,
+                            prompt.as_deref(),
                             None,
                         ) {
                             Ok(text) => Event::Done(text),
@@ -193,6 +199,7 @@ pub(crate) fn run(
     language: Option<&str>,
     threads: i32,
     translate: bool,
+    prompt: Option<&str>,
     // Present for previews, which are allowed to give up part way.
     abort: Option<Box<dyn FnMut() -> bool + 'static>>,
 ) -> Result<String> {
@@ -211,6 +218,10 @@ pub(crate) fn run(
         params.set_no_context(true);
     }
     params.set_language(language);
+    // Context for the decoder: names and jargon it would otherwise guess at.
+    if let Some(prompt) = prompt {
+        params.set_initial_prompt(prompt);
+    }
     params.set_n_threads(threads);
     params.set_translate(translate);
     params.set_suppress_blank(true);
@@ -282,6 +293,36 @@ mod tests {
         assert!(!is_silent(&speech));
     }
 
+    /// Proves the vocabulary reaches the decoder. Steering it towards nonsense
+    /// is the clearest way to see it land — a real vocabulary would only nudge
+    /// words the model already nearly had.
+    ///   YAPPER_TEST_WAV=samples/jfk.wav cargo test --release -- --ignored prompt_reaches
+    #[test]
+    #[ignore]
+    fn prompt_reaches_the_decoder() {
+        let path = std::env::var("YAPPER_TEST_WAV").expect("set YAPPER_TEST_WAV");
+        let samples = read_pcm16_wav(&path);
+        let config = Config::load().expect("loading config");
+        let context = load_model(&config.model_path).expect("loading the model");
+
+        let plain = run(&context, &samples, Some("en"), config.thread_count(), false, None, None)
+            .expect("transcribing");
+        let prompted = run(
+            &context,
+            &samples,
+            Some("en"),
+            config.thread_count(),
+            false,
+            Some("Hyprland, libadwaita, PipeWire, Vicinae, yapper"),
+            None,
+        )
+        .expect("transcribing");
+
+        println!("  without prompt: {plain}");
+        println!("  with prompt:    {prompted}");
+        assert!(!plain.is_empty() && !prompted.is_empty());
+    }
+
     #[test]
     #[ignore]
     fn transcribes_a_sample_wav() {
@@ -289,7 +330,7 @@ mod tests {
         let samples = read_pcm16_wav(&path);
         let config = Config::load().expect("loading config");
         let context = load_model(&config.model_path).expect("loading the model");
-        let text = run(&context, &samples, Some("en"), config.thread_count(), false, None)
+        let text = run(&context, &samples, Some("en"), config.thread_count(), false, None, None)
             .expect("transcribing");
         println!("transcript: {text}");
         assert!(!text.is_empty());

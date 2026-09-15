@@ -28,6 +28,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
     let page = adw::PreferencesPage::new();
 
     page.add(&transcription_group(parent, &config, &on_change));
+    page.add(&vocabulary_group(&config, &on_change));
     page.add(&output_group(&config, &on_change));
     page.add(&window_group(&config, &on_change));
 
@@ -183,6 +184,41 @@ fn transcription_group(
         }
     });
     group.add(&threads);
+
+    group
+}
+
+/// The whole point of this group is the description: an empty box with the
+/// word "Vocabulary" over it tells nobody what to type in it.
+fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Vocabulary")
+        .description(
+            "Names and jargon the model keeps getting wrong. It reads these \
+             before your speech and leans towards them, so write them as you \
+             would say them, separated by commas.\n\n\
+             For example: Hyprland, libadwaita, PipeWire, Vicinae\n\n\
+             Keep it to a line or two. A long list crowds out the audio and \
+             the model starts hearing your vocabulary instead of you.",
+        )
+        .build();
+
+    let prompt = adw::EntryRow::builder()
+        .title("Words to expect")
+        .text(&config.borrow().initial_prompt)
+        .build();
+    prompt.set_tooltip_text(Some(
+        "Passed to Whisper as context for every transcription. Leave empty for none.",
+    ));
+    prompt.connect_changed({
+        let config = Rc::clone(config);
+        let on_change = Rc::clone(on_change);
+        move |row| {
+            config.borrow_mut().initial_prompt = row.text().to_string();
+            save(&config, &on_change);
+        }
+    });
+    group.add(&prompt);
 
     group
 }

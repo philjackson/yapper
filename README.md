@@ -90,9 +90,16 @@ history_limit = 200
 live_preview = true
 silence_timeout = 0.0
 pause_players = true
+initial_prompt = ""
 ```
 
-Three worth knowing about:
+Four worth knowing about:
+
+**initial_prompt** is a vocabulary. Whisper reads it before your speech and
+leans towards those words, so proper nouns and jargon it keeps mangling —
+`Hyprland, libadwaita, PipeWire` — start coming out right. Preferences explains
+it under **Vocabulary**. Keep it to a line or two; a long list starts crowding
+out the audio.
 
 **pause_players** pauses whatever is playing over MPRIS while you dictate and
 starts it again afterwards, because anything out of the speakers ends up in the
