@@ -79,11 +79,6 @@ pub fn has_wl_copy() -> bool {
 }
 
 /// Whether we can type into the focused window.
-///
-/// wtype only, deliberately. ydotool injects at the kernel level through
-/// /dev/uinput, which wants a root daemon and bypasses the compositor
-/// entirely; wtype asks the compositor to do it over the virtual-keyboard
-/// protocol, as your own user, and inherits your keyboard layout.
 pub fn can_type() -> bool {
     which(TYPING_TOOL).is_some()
 }
