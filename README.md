@@ -96,10 +96,10 @@ initial_prompt = ""
 Four worth knowing about:
 
 **initial_prompt** is a vocabulary. Whisper reads it before your speech and
-leans towards those words, so proper nouns and jargon it keeps mangling —
-`Hyprland, libadwaita, PipeWire` — start coming out right. Preferences explains
-it under **Vocabulary**. Keep it to a line or two; a long list starts crowding
-out the audio.
+leans towards those words, so names and terms it keeps mangling — colleagues,
+places, anything unusual — start coming out right. Preferences explains it
+under **Vocabulary**. Keep it to a line or two; a long list starts crowding out
+the audio.
 
 **pause_players** pauses whatever is playing over MPRIS while you dictate and
 starts it again afterwards, because anything out of the speakers ends up in the

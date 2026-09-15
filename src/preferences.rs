@@ -197,7 +197,7 @@ fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::
             "Names and jargon the model keeps getting wrong. It reads these \
              before your speech and leans towards them, so write them as you \
              would say them, separated by commas.\n\n\
-             For example: Hyprland, libadwaita, PipeWire, Vicinae\n\n\
+             For example: Siobhan, Niamh, Loughborough, Sainsbury's\n\n\
              Keep it to a line or two. A long list crowds out the audio and \
              the model starts hearing your vocabulary instead of you.",
         )
