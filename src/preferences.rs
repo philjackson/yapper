@@ -223,6 +223,48 @@ fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::
     group
 }
 
+/// The microphone picker. "System default" comes first and is what most people
+/// want; the rest are the actual capture devices, not ALSA's plugin zoo.
+fn microphone_row(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::ComboRow {
+    let devices = crate::audio::input_devices();
+    let chosen = config.borrow().input_device.clone();
+
+    let mut ids: Vec<String> = vec![String::new()];
+    let names = gtk::StringList::new(&["System default"]);
+    for device in &devices {
+        ids.push(device.id.clone());
+        names.append(&device.name);
+    }
+
+    // A microphone that has been unplugged since it was chosen still shows,
+    // so the setting does not silently look like it was never made.
+    if !chosen.is_empty() && !ids.contains(&chosen) {
+        ids.push(chosen.clone());
+        names.append(&format!("{chosen} (not connected)"));
+    }
+
+    let selected = ids.iter().position(|id| *id == chosen).unwrap_or(0);
+    let row = adw::ComboRow::builder()
+        .title("Microphone")
+        .subtitle("Which input to record from")
+        .model(&names)
+        .selected(selected as u32)
+        .build();
+
+    row.connect_selected_notify({
+        let config = Rc::clone(config);
+        let on_change = Rc::clone(on_change);
+        move |row| {
+            let Some(id) = ids.get(row.selected() as usize) else {
+                return;
+            };
+            config.borrow_mut().input_device = id.clone();
+            save(&config, &on_change);
+        }
+    });
+    row
+}
+
 fn output_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("When a transcript arrives")
@@ -282,6 +324,8 @@ fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
         }
     });
     group.add(&preview);
+
+    group.add(&microphone_row(config, on_change));
 
     let pause = adw::SwitchRow::builder()
         .title("Pause media while recording")

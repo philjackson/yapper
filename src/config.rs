@@ -31,6 +31,9 @@ pub struct Config {
     /// Pause anything that is playing while you dictate, and start it again
     /// afterwards. Speakers bleed into the microphone.
     pub pause_players: bool,
+    /// Which microphone to record from, as a cpal device id. Empty means
+    /// whichever one the system calls default.
+    pub input_device: String,
     /// Words to expect: names and jargon Whisper would otherwise guess at.
     /// Passed to the model as context for every transcription.
     pub initial_prompt: String,
@@ -49,6 +52,7 @@ impl Default for Config {
             live_preview: true,
             silence_timeout: 0.0,
             pause_players: true,
+            input_device: String::new(),
             initial_prompt: String::new(),
         }
     }

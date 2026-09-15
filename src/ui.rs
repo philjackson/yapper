@@ -459,7 +459,8 @@ impl App {
             *self.paused_players.borrow_mut() = players::pause_playing();
         }
 
-        match Recorder::start() {
+        let device = self.config.borrow().input_device.clone();
+        match Recorder::start(Some(&device)) {
             Ok(recorder) => {
                 *self.recorder.borrow_mut() = Some(recorder);
                 self.show_preview("");

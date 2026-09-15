@@ -84,6 +84,7 @@ model_path = "/home/you/.local/share/yapper/models/ggml-base.en.bin"
 language = "auto"          # or an ISO code like "en", "de"
 translate = false          # translate to English rather than transcribe
 threads = 0                # 0 picks from the CPU count
+input_device = ""          # empty = whatever the system calls default
 copy_to_clipboard = true
 type_on_finish = false
 history_limit = 200

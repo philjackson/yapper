@@ -53,11 +53,27 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Open the default input device and start filling the buffer.
-    pub fn start() -> Result<Self> {
+    /// Open an input device and start filling the buffer. `wanted` is a device
+    /// id from [`input_devices`]; an empty or unknown one falls back to the
+    /// system default, since an unplugged microphone should not stop yapper
+    /// from recording at all.
+    pub fn start(wanted: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
+        let device = wanted
+            .filter(|id| !id.is_empty())
+            .and_then(|id| match id.parse::<cpal::DeviceId>() {
+                Ok(id) => host.device_by_id(&id),
+                Err(err) => {
+                    eprintln!("yapper: cannot read input device id {id:?}: {err}");
+                    None
+                }
+            })
+            .or_else(|| {
+                if wanted.is_some_and(|id| !id.is_empty()) {
+                    eprintln!("yapper: chosen input device is not connected, using the default");
+                }
+                host.default_input_device()
+            })
             .ok_or_else(|| anyhow!("no input device available"))?;
 
         let supported = pick_config(&device)?;
@@ -170,6 +186,51 @@ where
             None,
         )
         .context("building the input stream")
+}
+
+/// An input device a person might actually want to choose, with the id to
+/// persist and a name to show.
+pub struct InputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+/// The microphones worth offering in a picker.
+///
+/// ALSA advertises dozens of entries, most of them plugins ("Rate Converter",
+/// "Discard all samples") or lower-level duplicates of the same card. The
+/// `sysdefault:CARD=` form is the one canonical entry per piece of hardware,
+/// so that is what gets listed.
+pub fn input_devices() -> Vec<InputDevice> {
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for device in devices {
+        let (Ok(id), Ok(description)) = (device.id(), device.description()) else {
+            continue;
+        };
+        let id = id.to_string();
+        if !is_real_microphone(&id) {
+            continue;
+        }
+        // Several ids can describe one microphone; one entry each is plenty.
+        if seen.insert(description.name().to_string()) {
+            found.push(InputDevice {
+                id,
+                name: description.name().to_string(),
+            });
+        }
+    }
+    found
+}
+
+/// A real capture device rather than one of ALSA's processing plugins.
+fn is_real_microphone(id: &str) -> bool {
+    id.contains(":sysdefault:CARD=")
 }
 
 /// Prefer a config we can use as-is: 16 kHz so there is nothing to resample,
@@ -328,6 +389,30 @@ mod tests {
     }
 
     #[test]
+    fn plugins_are_not_offered_as_microphones() {
+        assert!(is_real_microphone("alsa:sysdefault:CARD=BRIO"));
+        assert!(is_real_microphone("alsa:sysdefault:CARD=Audio"));
+        // ALSA's processing plugins and lower-level duplicates of a card.
+        for plugin in [
+            "alsa:null",
+            "alsa:lavrate",
+            "alsa:speexrate",
+            "alsa:upmix",
+            "alsa:vdownmix",
+            "alsa:pipewire",
+            "alsa:pulse",
+            "alsa:sysdefault",
+            "alsa:default",
+            "alsa:hw:CARD=0,DEV=0",
+            "alsa:plughw:CARD=0,DEV=0",
+            "alsa:front:CARD=BRIO,DEV=0",
+            "alsa:usbstream:CARD=BRIO",
+        ] {
+            assert!(!is_real_microphone(plugin), "{plugin} should not be listed");
+        }
+    }
+
+    #[test]
     fn downmix_averages_channels() {
         let stereo = [1.0, 0.0, 0.5, 0.5];
         assert_eq!(downmix(&stereo, 2), vec![0.5, 0.5]);
@@ -353,7 +438,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_capture_produces_16k_mono_audio() {
-        let recorder = Recorder::start().expect("opening the default input device");
+        let recorder = Recorder::start(None).expect("opening the default input device");
         std::thread::sleep(std::time::Duration::from_millis(500));
         let samples = recorder.finish();
         assert!(
@@ -361,5 +446,34 @@ mod tests {
             "expected ~0.5s of audio, got {} samples",
             samples.len()
         );
+    }
+}
+
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    /// What the picker will show: `cargo test -- --ignored --nocapture offered_microphones`
+    #[test]
+    #[ignore]
+    fn offered_microphones() {
+        println!("  System default");
+        for device in input_devices() {
+            println!("  {}  [{}]", device.name, device.id);
+        }
+    }
+
+    /// Opening a named device really opens that one:
+    /// `YAPPER_TEST_DEVICE=alsa:sysdefault:CARD=BRIO cargo test -- --ignored --nocapture opens_the_chosen`
+    #[test]
+    #[ignore]
+    fn opens_the_chosen_device() {
+        let wanted = std::env::var("YAPPER_TEST_DEVICE").ok();
+        let recorder = Recorder::start(wanted.as_deref()).expect("opening the device");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let samples = recorder.finish();
+        println!("  captured {} samples at 16 kHz mono", samples.len());
+        assert!(samples.len() > TARGET_RATE as usize / 8);
     }
 }
