@@ -284,15 +284,16 @@ fn output_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
     });
     group.add(&copy);
 
-    let typing = crate::output::typing_backend();
+    let can_type = crate::output::can_type();
     let type_row = adw::SwitchRow::builder()
         .title("Type into the focused window")
-        .subtitle(match typing {
-            Some(tool) => format!("Using {tool}"),
-            None => "Needs wtype or ydotool installed".to_string(),
+        .subtitle(if can_type {
+            "Using wtype"
+        } else {
+            "Needs wtype installed"
         })
-        .active(config.borrow().type_on_finish && typing.is_some())
-        .sensitive(typing.is_some())
+        .active(config.borrow().type_on_finish && can_type)
+        .sensitive(can_type)
         .build();
     type_row.connect_active_notify({
         let config = Rc::clone(config);

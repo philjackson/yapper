@@ -120,8 +120,10 @@ Bigger models are slower and more accurate: tiny 75 MB, base 148 MB, small
 488 MB, medium 1.5 GB, large 3.1 GB. Preferences has a link to download more.
 
 Typing into the focused window instead of the clipboard needs
-[wtype](https://github.com/atx/wtype) or ydotool; the button is disabled
-without one.
+[wtype](https://github.com/atx/wtype); the button is disabled without it.
+wtype asks the compositor to type, as your own user, and follows your keyboard
+layout. ydotool is not supported: it injects at the kernel level through
+`/dev/uinput`, which wants a root daemon and bypasses the compositor.
 
 ## Files
 

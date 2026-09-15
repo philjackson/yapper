@@ -3,7 +3,6 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
-use std::io::Write;
 
 /// Copy via `wl-copy` when it exists: unlike GTK's own clipboard, its contents
 /// survive yapper exiting. Falls back to the GTK clipboard otherwise.
@@ -79,47 +78,33 @@ pub fn has_wl_copy() -> bool {
     which("wl-copy").is_some()
 }
 
-/// The tool we'd use to type into the focused window, if any is installed.
-pub fn typing_backend() -> Option<&'static str> {
-    ["wtype", "ydotool"].into_iter().find(|t| which(t).is_some())
+/// Whether we can type into the focused window.
+///
+/// wtype only, deliberately. ydotool injects at the kernel level through
+/// /dev/uinput, which wants a root daemon and bypasses the compositor
+/// entirely; wtype asks the compositor to do it over the virtual-keyboard
+/// protocol, as your own user, and inherits your keyboard layout.
+pub fn can_type() -> bool {
+    which(TYPING_TOOL).is_some()
 }
+
+const TYPING_TOOL: &str = "wtype";
 
 /// Type the text into whichever window has focus.
 pub fn type_text(text: &str) -> Result<()> {
-    match typing_backend() {
-        Some("wtype") => {
-            // `--` so text starting with a dash isn't read as a flag.
-            let status = Command::new("wtype")
-                .arg("--")
-                .arg(text)
-                .status()
-                .context("running wtype")?;
-            if !status.success() {
-                return Err(anyhow!("wtype exited with {status}"));
-            }
-            Ok(())
-        }
-        Some("ydotool") => {
-            let mut child = Command::new("ydotool")
-                .args(["type", "--file", "-"])
-                .stdin(Stdio::piped())
-                .spawn()
-                .context("running ydotool (is ydotoold running?)")?;
-            child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| anyhow!("no stdin on ydotool"))?
-                .write_all(text.as_bytes())?;
-            let status = child.wait()?;
-            if !status.success() {
-                return Err(anyhow!("ydotool exited with {status}"));
-            }
-            Ok(())
-        }
-        _ => Err(anyhow!(
-            "no typing backend found; install wtype (or ydotool with ydotoold running)"
-        )),
+    if !can_type() {
+        return Err(anyhow!("wtype is not installed"));
     }
+    // `--` so text starting with a dash isn't read as a flag.
+    let status = Command::new(TYPING_TOOL)
+        .arg("--")
+        .arg(text)
+        .status()
+        .context("running wtype")?;
+    if !status.success() {
+        return Err(anyhow!("wtype exited with {status}"));
+    }
+    Ok(())
 }
 
 fn which(program: &str) -> Option<std::path::PathBuf> {

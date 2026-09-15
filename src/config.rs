@@ -18,7 +18,7 @@ pub struct Config {
     pub threads: u32,
     /// Put the transcript on the clipboard as soon as it arrives.
     pub copy_to_clipboard: bool,
-    /// Type the transcript into the focused window (needs wtype or ydotool).
+    /// Type the transcript into the focused window (needs wtype).
     pub type_on_finish: bool,
     /// How many past transcripts to keep. Older ones fall off the end.
     pub history_limit: usize,

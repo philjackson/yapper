@@ -210,9 +210,10 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     delete_button.add_css_class("delete");
     let type_button = icon_button(
         "input-keyboard-symbolic",
-        &match output::typing_backend() {
-            Some(tool) => format!("Type the selected transcript using {tool}"),
-            None => "Install wtype or ydotool to type into the focused window".to_string(),
+        if output::can_type() {
+            "Type the selected transcript into the focused window"
+        } else {
+            "Install wtype to type into the focused window"
         },
     );
     let copy_button = icon_button("edit-copy-symbolic", "Copy the selected transcript");
@@ -731,7 +732,7 @@ impl App {
         self.copy_button.set_sensitive(selected);
         self.delete_button.set_sensitive(selected);
         self.type_button
-            .set_sensitive(selected && output::typing_backend().is_some());
+            .set_sensitive(selected && output::can_type());
     }
 
     /// Install the tick callback, unless one is already running.
