@@ -127,3 +127,9 @@ window.quick .quick-card {
   background-color: @window_bg_color;
   border: 1px solid alpha(currentColor, 0.12);
 }
+
+/* Banners are square-edged by default, which reads as a mistake against the
+   quick panel's rounded card and the window's own rounded corners. */
+banner > revealer > widget {
+  border-radius: 12px;
+}
