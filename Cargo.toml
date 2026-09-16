@@ -1,6 +1,6 @@
 [package]
 name = "yapper"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Push-to-talk speech-to-text for Wayland, with a small GTK4 window"
 license = "MIT"
