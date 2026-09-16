@@ -94,6 +94,7 @@ struct App {
     mic_pages: gtk::Stack,
     status_label: gtk::Label,
     hint_label: gtk::Label,
+    banner: adw::Banner,
     preview_label: gtk::Label,
     list: gtk::ListBox,
     list_pages: gtk::Stack,
@@ -238,10 +239,33 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     right.append(&copy_button);
     actions.set_end_widget(Some(&right));
 
+    // Shown only when something needs doing that yapper cannot do itself.
+    // A banner rather than the empty-state page, because the page is hidden as
+    // soon as there is any history, and quick capture has no page at all.
+    let banner = adw::Banner::builder()
+        .button_label("Get a model")
+        .revealed(false)
+        .build();
+    banner.connect_button_clicked({
+        let window = window.clone();
+        move |_| {
+            gtk::UriLauncher::new(preferences::MODELS_URL).launch(
+                Some(&window),
+                gtk::gio::Cancellable::NONE,
+                |result| {
+                    if let Err(err) = result {
+                        eprintln!("yapper: could not open the models page: {err}");
+                    }
+                },
+            );
+        }
+    });
+
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .build();
+    content.append(&banner);
     content.append(&overlay);
     content.append(&status_label);
     content.append(&hint_label);
@@ -315,6 +339,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         mic_pages,
         status_label,
         hint_label,
+        banner,
         preview_label,
         list: list.clone(),
         list_pages,
@@ -596,7 +621,10 @@ impl App {
                 eprintln!("yapper: {err}");
                 self.empty_page.set_title("Model unavailable");
                 self.empty_page.set_description(Some(&err));
-                self.set_state(State::Broken("model failed to load".into()));
+                self.banner
+                    .set_title("No speech model. Download one, then choose it in Preferences.");
+                self.banner.set_revealed(true);
+                self.set_state(State::Broken("no speech model".into()));
                 if self.quick && !self.window.is_visible() {
                     self.quit();
                 }
@@ -911,13 +939,7 @@ impl App {
                 true,
                 false,
             ),
-            State::Broken(err) => (
-                err.clone(),
-                "See below for details",
-                "Unavailable",
-                false,
-                false,
-            ),
+            State::Broken(err) => (err.clone(), "", "Unavailable", false, false),
         };
 
         self.status_label.set_label(&status);
