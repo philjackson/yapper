@@ -38,6 +38,14 @@ const PREVIEW_CHARS: usize = 150;
 /// countdown keeps it from flickering on every breath.
 const COUNTDOWN_AFTER: f32 = 0.35;
 
+// The first launch builds the window and stays resident; later ones find this
+// process over D-Bus and land in `build` again with the model already loaded.
+// The hold guard keeps the process alive while the panel is hidden.
+thread_local! {
+    static RUNNING: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
+    static HOLD: RefCell<Option<gtk::gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
+}
+
 #[derive(Clone, PartialEq)]
 enum State {
     /// Waiting for the model to finish loading.
@@ -96,6 +104,11 @@ struct App {
 }
 
 pub fn build(app: &adw::Application, config: Config, options: Options) {
+    if let Some(running) = RUNNING.with(|running| running.borrow().clone()) {
+        running.reopen();
+        return;
+    }
+
     load_css();
 
     let worker = transcribe::spawn(&config);
@@ -403,6 +416,14 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         }
     });
 
+    RUNNING.with(|running| *running.borrow_mut() = Some(Rc::clone(&app_state)));
+
+    // Without this the process would end when the panel is hidden, and the next
+    // keypress would pay for the model all over again.
+    if options.quick {
+        HOLD.with(|hold| *hold.borrow_mut() = Some(app.hold()));
+    }
+
     window.connect_close_request({
         let app_state = Rc::clone(&app_state);
         move |_| {
@@ -550,7 +571,7 @@ impl App {
         self.set_state(State::Idle);
 
         if self.quick {
-            self.quit();
+            self.retire();
         } else {
             self.toast("Recording discarded");
         }
@@ -594,7 +615,7 @@ impl App {
                 if text.is_empty() {
                     self.report("No speech detected");
                     if self.quick {
-                        self.quit();
+                        self.retire();
                     }
                     return;
                 }
@@ -617,14 +638,14 @@ impl App {
                 }
                 self.remember(text);
                 if self.quick {
-                    self.quit();
+                    self.retire();
                 }
             }
             Event::Failed(err) => {
                 self.set_state(State::Idle);
                 self.report(&format!("Transcription failed: {err}"));
                 if self.quick {
-                    self.quit();
+                    self.retire();
                 }
             }
         }
@@ -971,13 +992,30 @@ impl App {
         match state {
             State::Recording => self.cancel_recording(),
             State::Working => self.window.set_visible(false),
-            _ => self.quit(),
+            _ => self.retire(),
         }
     }
 
     fn quit(&self) {
         self.quitting.set(true);
         self.app.quit();
+    }
+
+    /// A later launch, arriving at the instance that is already running.
+    fn reopen(self: &Rc<Self>) {
+        self.window.present();
+        // Opening quick capture means starting a recording; that is the verb.
+        if self.quick && matches!(*self.state.borrow(), State::Idle) {
+            self.start_recording();
+        }
+    }
+
+    /// Put the panel away but stay in memory, ready for the next keypress.
+    fn retire(self: &Rc<Self>) {
+        self.window.set_visible(false);
+        self.show_preview("");
+        self.preview_label.set_visible(false);
+        self.set_state(State::Idle);
     }
 }
 

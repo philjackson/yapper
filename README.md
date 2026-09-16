@@ -55,6 +55,11 @@ It's a layer-shell surface, so it floats above everything without needing a
 window rule. Recording starts before the model has finished loading, so there's
 nothing to wait for.
 
+The first press starts yapper and takes a couple of hundred milliseconds; after
+that it stays running with the panel hidden, and later presses open in around
+20ms. Nothing to set up — press the key and it sorts itself out. `pkill yapper`
+if you want the memory back.
+
 ## Keys
 
 | | |
