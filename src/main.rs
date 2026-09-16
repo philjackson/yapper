@@ -46,6 +46,10 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::FAILURE;
     }
 
+    if options.stop_daemon {
+        return stop_daemon();
+    }
+
     let config = match config::Config::load() {
         Ok(config) => config,
         Err(err) => {
@@ -60,7 +64,45 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder()
         .application_id(if options.quick { QUICK_APP_ID } else { APP_ID })
         .build();
+
+    // So --stop-daemon has something to ask for over D-Bus.
+    let quit = gtk::gio::SimpleAction::new("quit", None);
+    quit.connect_activate({
+        let app = app.clone();
+        move |_, _| app.quit()
+    });
+    app.add_action(&quit);
+
     app.connect_activate(move |app| ui::build(app, config.clone(), options));
     // Arguments are parsed above, and GTK would otherwise try to open them as files.
     app.run_with_args::<&str>(&[])
+}
+
+/// Ask the resident quick capture process to exit, without putting anything on
+/// screen.
+///
+/// Registering against the same application id says whether one is running:
+/// if it is, we are the remote end and can activate its quit action; if not,
+/// we briefly become the primary instance ourselves and there was nothing to
+/// stop.
+fn stop_daemon() -> glib::ExitCode {
+    let app = gtk::gio::Application::new(Some(QUICK_APP_ID), gtk::gio::ApplicationFlags::empty());
+
+    if let Err(err) = app.register(gtk::gio::Cancellable::NONE) {
+        eprintln!("yapper: cannot reach the session bus: {err}");
+        return glib::ExitCode::FAILURE;
+    }
+
+    if !app.is_remote() {
+        println!("yapper: no quick capture process running");
+        return glib::ExitCode::SUCCESS;
+    }
+
+    app.activate_action("quit", None);
+    // The message is queued on the bus; leaving now could drop it.
+    if let Some(bus) = app.dbus_connection() {
+        let _ = bus.flush_sync(gtk::gio::Cancellable::NONE);
+    }
+    println!("yapper: quick capture stopped");
+    glib::ExitCode::SUCCESS
 }

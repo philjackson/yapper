@@ -14,6 +14,8 @@ pub struct Options {
     /// Quick capture: a floating panel that records the moment it opens and
     /// puts the transcript on the clipboard as it closes.
     pub quick: bool,
+    /// Tell the resident quick capture process to exit. Shows no window.
+    pub stop_daemon: bool,
 }
 
 pub const USAGE: &str = "\
@@ -26,6 +28,8 @@ OPTIONS:
     -q, --quick      Quick capture: open as a floating panel, start recording
                      immediately, and copy the transcript to the clipboard on
                      close. Meant to be bound to a key.
+    --stop-daemon    Stop the process quick capture leaves running, freeing
+                     the memory the model holds. Shows no window.
     -h, --help       Print this help
     -V, --version    Print the version
 
@@ -45,6 +49,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Invocation {
     for argument in args {
         match argument.as_str() {
             "-q" | "--quick" => options.quick = true,
+            "--stop-daemon" => options.stop_daemon = true,
             "-h" | "--help" => return Invocation::Help,
             "-V" | "--version" => return Invocation::Version,
             other => {
@@ -68,7 +73,10 @@ mod tests {
     fn no_arguments_runs_the_normal_window() {
         assert!(matches!(
             parse_args(&[]),
-            Invocation::Run(Options { quick: false })
+            Invocation::Run(Options {
+                quick: false,
+                stop_daemon: false
+            })
         ));
     }
 
@@ -76,11 +84,22 @@ mod tests {
     fn quick_has_a_short_and_a_long_form() {
         assert!(matches!(
             parse_args(&["-q"]),
-            Invocation::Run(Options { quick: true })
+            Invocation::Run(Options { quick: true, .. })
         ));
         assert!(matches!(
             parse_args(&["--quick"]),
-            Invocation::Run(Options { quick: true })
+            Invocation::Run(Options { quick: true, .. })
+        ));
+    }
+
+    #[test]
+    fn stop_daemon_is_its_own_mode() {
+        assert!(matches!(
+            parse_args(&["--stop-daemon"]),
+            Invocation::Run(Options {
+                stop_daemon: true,
+                ..
+            })
         ));
     }
 
