@@ -150,6 +150,17 @@ History is stored as JSON Lines, with one transcript per line. You can search
 it with grep, and a damaged line won't prevent the other entries from loading.
 Only the text is saved; audio is discarded after transcription.
 
+## Releasing
+
+```sh
+./scripts/release.sh patch      # or minor, major, or an explicit 0.2.0
+```
+
+Bumps the version, builds, tests, tags and pushes; the workflow takes it from
+there. It refuses to run from a dirty tree, from anywhere but an up-to-date
+`main`, or onto a version that already has a tag or a release, and shows you
+what it will do before anything is pushed.
+
 ## Todo
 
 - Search transcript history in the app
