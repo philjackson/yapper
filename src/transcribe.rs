@@ -48,6 +48,9 @@ pub struct Settings {
     pub hears: String,
     pub writes: String,
     pub threads: i32,
+    /// Applied to every transcript, preview and final alike, so what you see
+    /// while talking is what lands on the clipboard.
+    pub replacements: Vec<crate::replace::Replacement>,
 }
 
 impl Settings {
@@ -62,6 +65,7 @@ impl Settings {
             hears: hears.to_string(),
             writes: writes.to_string(),
             threads: config.thread_count(),
+            replacements: config.replacements.clone(),
         }
     }
 }
@@ -261,7 +265,7 @@ impl Loaded {
         if is_annotation(text) {
             return Ok(String::new());
         }
-        Ok(text.to_string())
+        Ok(crate::replace::apply(text, &settings.replacements))
     }
 }
 
@@ -420,6 +424,7 @@ mod tests {
             hears: "en".into(),
             writes: "en".into(),
             threads: 4,
+            replacements: Vec::new(),
         };
         assert_eq!(Baked::of(&base), Baked::of(&base.clone()));
 
@@ -446,9 +451,14 @@ mod tests {
         };
         assert_ne!(Baked::of(&base), Baked::of(&busier));
 
-        // The threshold is read per job, so it must not cost a reload.
+        // The threshold and the replacements are read per job, so they must
+        // not cost a reload.
         let fussier = Settings {
             silence_threshold: 0.05,
+            replacements: vec![crate::replace::Replacement {
+                say: "minus minus".into(),
+                write: "--".into(),
+            }],
             ..base.clone()
         };
         assert_eq!(Baked::of(&base), Baked::of(&fussier));

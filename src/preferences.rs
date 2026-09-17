@@ -56,7 +56,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
         .build();
     let page = adw::PreferencesPage::new();
 
-    let (transcription, rows) = transcription_group(&prefs);
+    let (transcription, rows) = transcription_group();
 
     // What a model can be told varies by engine, so the rows follow whichever
     // one is chosen rather than offering settings it would ignore.
@@ -93,6 +93,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
     });
 
     page.add(&transcription);
+    page.add(&Replacements::group(&prefs));
     page.add(&output_group(&prefs));
     page.add(&window_group(&prefs));
 
@@ -145,7 +146,9 @@ fn spoken(config: &Config, model: &crate::models::Model) -> String {
     }
 }
 
-fn transcription_group(prefs: &Rc<Prefs>) -> (adw::PreferencesGroup, Rows) {
+/// Everything about the model sits behind one row; the group itself has no
+/// settings of its own left.
+fn transcription_group() -> (adw::PreferencesGroup, Rows) {
     let group = adw::PreferencesGroup::builder()
         .title("Transcription")
         .description("Choosing a model downloads it if it isn't here, and loads it straight away")
@@ -166,22 +169,168 @@ fn transcription_group(prefs: &Rc<Prefs>) -> (adw::PreferencesGroup, Rows) {
     model.set_activatable_widget(Some(&choose));
     group.add(&model);
 
-    group.add(&spin_row(
-        prefs,
-        "Threads",
-        "0 picks a sensible number from the CPU count",
-        SpinRange {
-            lower: 0.0,
-            upper: 64.0,
-            step: 1.0,
-            page: 4.0,
-            digits: 0,
-        },
-        |c| c.threads as f64,
-        |c, value| c.threads = value as u32,
-    ));
+    // Threads is not here on purpose: the number picked from the CPU count is
+    // right on every machine we have tried, and a wrong one shows up as a slow
+    // transcription rather than as an obvious mistake. It is still read from
+    // config.toml for anyone who wants to insist.
 
     (group, Rows { model, choose })
+}
+
+/// The list of "say this, write that" rules.
+///
+/// A rule is two boxes and a bin: there is no dialog to open and no OK to
+/// press, because a list of a dozen little rules is not worth a journey each
+/// time. Adding one leaves an empty pair of boxes to type into, which is what
+/// makes the first one obvious.
+struct Replacements {
+    prefs: Rc<Prefs>,
+    group: adw::PreferencesGroup,
+    /// The rows on screen, so they can be taken off again when the list
+    /// changes underneath them.
+    rows: RefCell<Vec<adw::PreferencesRow>>,
+}
+
+impl Replacements {
+    fn group(prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder()
+            .title("Say this, write that")
+            .description(
+                "Dictation is bad at symbols, so say something it can hear and have yapper \
+                 write what you meant. Say \u{201c}minus minus\u{201d} and get --, or leave the \
+                 second box empty to drop a word you keep saying.\n\n\
+                 Capitals and the model's own commas are ignored when matching, and a longer \
+                 phrase wins over a shorter one.",
+            )
+            .build();
+
+        let add = gtk::Button::builder()
+            .label("Add")
+            .valign(gtk::Align::Center)
+            .build();
+        group.set_header_suffix(Some(&add));
+
+        let list = Rc::new(Replacements {
+            prefs: Rc::clone(prefs),
+            group: group.clone(),
+            rows: RefCell::new(Vec::new()),
+        });
+
+        add.connect_clicked({
+            let list = Rc::clone(&list);
+            move |_| {
+                list.prefs
+                    .update(|config| config.replacements.push(Default::default()));
+                list.rebuild();
+                // The box you are about to type in should be the one with the
+                // cursor already in it.
+                list.focus_last();
+            }
+        });
+
+        list.rebuild();
+        group
+    }
+
+    /// Redraw the whole list. Cheap at this size, and it keeps every row's idea
+    /// of which rule it edits in step with the config after a delete.
+    fn rebuild(self: &Rc<Self>) {
+        for row in self.rows.borrow_mut().drain(..) {
+            self.group.remove(&row);
+        }
+        let count = self.prefs.get(|config| config.replacements.len());
+        for index in 0..count {
+            let row = self.row(index);
+            self.group.add(&row);
+            self.rows.borrow_mut().push(row);
+        }
+    }
+
+    fn row(self: &Rc<Self>, index: usize) -> adw::PreferencesRow {
+        let (say_text, write_text) = self.prefs.get(|config| {
+            let rule = &config.replacements[index];
+            (rule.say.clone(), rule.write.clone())
+        });
+
+        let say = gtk::Entry::builder()
+            .text(say_text)
+            .placeholder_text("minus minus")
+            .hexpand(true)
+            .build();
+        let write = gtk::Entry::builder()
+            .text(write_text)
+            .placeholder_text("--")
+            .hexpand(true)
+            .build();
+        let delete = gtk::Button::builder()
+            .icon_name("user-trash-symbolic")
+            .tooltip_text("Remove this rule")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+
+        for entry in [&say, &write] {
+            entry.connect_changed({
+                let list = Rc::clone(self);
+                let say = say.clone();
+                let write = write.clone();
+                move |_| {
+                    list.prefs.update(|config| {
+                        if let Some(rule) = config.replacements.get_mut(index) {
+                            rule.say = say.text().to_string();
+                            rule.write = write.text().to_string();
+                        }
+                    })
+                }
+            });
+        }
+        delete.connect_clicked({
+            let list = Rc::clone(self);
+            move |_| {
+                list.prefs.update(|config| {
+                    if index < config.replacements.len() {
+                        config.replacements.remove(index);
+                    }
+                });
+                list.rebuild();
+            }
+        });
+
+        let line = gtk::Box::builder()
+            .spacing(8)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        line.append(&say);
+        line.append(
+            &gtk::Label::builder()
+                .label("\u{2192}")
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        line.append(&write);
+        line.append(&delete);
+
+        adw::PreferencesRow::builder()
+            .activatable(false)
+            .selectable(false)
+            .child(&line)
+            .build()
+    }
+
+    /// Put the cursor in the row that was just added.
+    fn focus_last(self: &Rc<Self>) {
+        if let Some(row) = self.rows.borrow().last() {
+            row.child()
+                .and_downcast::<gtk::Box>()
+                .and_then(|line| line.first_child())
+                .inspect(|entry| {
+                    entry.grab_focus();
+                });
+        }
+    }
 }
 
 /// A live level meter with the silence threshold drawn across it.

@@ -147,7 +147,6 @@ You can also edit the settings in `~/.config/yapper/config.toml`:
 
 ```toml
 model = "canary-180m-flash" # a name from the model list
-threads = 0                 # 0 chooses based on your CPU count
 input_device = ""           # empty uses the system default
 copy_to_clipboard = true
 type_on_finish = false
@@ -157,20 +156,29 @@ silence_timeout = 0.0
 silence_threshold = 0.004
 pause_players = true
 
-[languages]                      # what each model was told, by model
-canary-180m-flash = "de>en"      # hears German, writes English
-sense-voice = "auto"             # left to detect
+[[replacements]]                 # say this, write that
+say = "minus minus"
+write = "--"
 ```
 
 **Model (`model`)** names a model from the list above. Choosing one in the
 picker downloads it if it isn't here and loads it straight away.
 
-**Languages (`[languages]`)** keeps one entry per model: a language code, or
-`hears>writes` when a model is writing a different language than it hears.
-It's per model on purpose — `de` is exactly right for Canary and not a language
-SenseVoice will accept at all — and a code a model can't use is quietly
-replaced by one it can rather than stopping it from loading. Set it in the
-model list; there's no need to edit this by hand.
+**Replacements (`[[replacements]]`)** are words you say and the text yapper
+writes instead. Dictation is hopeless at symbols, so say something a model can
+hear — "minus minus" — and have it come out as `--`. Set them up under **Say
+this, write that** in preferences: two boxes and a bin each, and **Add** for
+another.
+
+Matching is by word, not by raw text, so a rule survives the model's own
+capitals and commas: "minus minus" catches "Minus, minus" too. It won't reach
+across a full stop or a line break, a longer phrase wins over a shorter one,
+and what a rule writes is never matched again, so rules can't chain. Leave the
+second box empty to drop a word you keep saying. A replacement that spans lines
+has to be written in `config.toml`, since the box is one line.
+
+Replacements apply to the live transcript as well as the final one, so what you
+watch while talking is what lands on your clipboard.
 
 **Pause players (`pause_players`)** pauses media players that support MPRIS while
 you dictate, so sound from your speakers is less likely to end up in the
@@ -193,10 +201,6 @@ seconds if you'd like recordings to finish automatically.
 you talk. Earlier words may change as the model gets more context. When you
 finish, yapper transcribes the full recording again and copies that final
 version to the clipboard.
-
-**Translation** is Canary only, and it is the same control as its language: set
-**writes** to something other than **hears** and it translates between them —
-English, German, Spanish or French in any direction.
 
 To type a transcript directly into the focused window, you'll need
 [wtype](https://github.com/atx/wtype). The typing button is disabled if it isn't

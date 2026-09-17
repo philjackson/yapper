@@ -26,7 +26,9 @@ pub struct Config {
     /// As `language`: the old switch for translating into English.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translate: Option<bool>,
-    /// Inference threads; 0 picks a sensible default from the CPU count.
+    /// Inference threads; 0 picks a sensible default from the CPU count. Not
+    /// in preferences: the default is right on every machine we have seen, and
+    /// a wrong one is a slow transcription rather than an obvious mistake.
     pub threads: u32,
     /// Put the transcript on the clipboard as soon as it arrives.
     pub copy_to_clipboard: bool,
@@ -49,6 +51,10 @@ pub struct Config {
     /// Which microphone to record from, as a cpal device id. Empty means
     /// whichever one the system calls default.
     pub input_device: String,
+    /// Words you say and the text they become: "minus minus" for `--`, and
+    /// anything else dictation is bad at saying. See [`crate::replace`].
+    #[serde(default)]
+    pub replacements: Vec<crate::replace::Replacement>,
 }
 
 impl Default for Config {
@@ -67,6 +73,7 @@ impl Default for Config {
             silence_threshold: crate::audio::DEFAULT_SILENCE_RMS,
             pause_players: true,
             input_device: String::new(),
+            replacements: Vec::new(),
         }
     }
 }

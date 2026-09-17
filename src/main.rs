@@ -8,6 +8,7 @@ mod models;
 mod output;
 mod picker;
 mod players;
+mod replace;
 mod preferences;
 mod stage;
 mod transcribe;
