@@ -63,10 +63,11 @@ struct App {
     quick: bool,
     /// Set once we've decided to exit, so the close handler stops intervening.
     quitting: Cell<bool>,
-    /// Whether this particular capture should be typed out. Set per capture
-    /// rather than per process, because one resident process serves keybinds
-    /// that want different things.
+    /// What should happen to this particular capture. Set per capture rather
+    /// than per process, because one resident process serves keybinds that
+    /// want different things.
     type_this_capture: Cell<bool>,
+    copy_this_capture: Cell<bool>,
     app: adw::Application,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
@@ -324,6 +325,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         quick: options.quick,
         quitting: Cell::new(false),
         type_this_capture: Cell::new(options.type_output),
+        copy_this_capture: Cell::new(options.copy_output),
         app: app.clone(),
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
@@ -655,14 +657,22 @@ impl App {
                     }
                     return;
                 }
-                // Copying is the whole point of quick capture, whatever the
-                // config says about the normal window.
-                if (self.config.borrow().copy_to_clipboard || self.quick)
+                // Quick capture does what its flags asked for and nothing
+                // else; the window follows the settings. Asking for neither is
+                // a real answer: keep the transcript, touch nothing.
+                let (wants_copy, wants_typing) = if self.quick {
+                    (self.copy_this_capture.get(), self.type_this_capture.get())
+                } else {
+                    let config = self.config.borrow();
+                    (config.copy_to_clipboard, config.type_on_finish)
+                };
+
+                if wants_copy
                     && let Err(err) = output::copy(&text)
                 {
                     self.report(&format!("Copy failed: {err}"));
                 }
-                if (self.config.borrow().type_on_finish || self.type_this_capture.get())
+                if wants_typing
                     && let Err(err) = output::type_text(&text)
                 {
                     self.report(&format!("{err}"));
@@ -1126,11 +1136,12 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
 
 /// Start a capture on the process that is already running, for a launch that
 /// could not simply become it.
-pub fn start_capture(typed: bool) {
+pub fn start_capture(typed: bool, copied: bool) {
     let Some(running) = RUNNING.with(|running| running.borrow().clone()) else {
         return;
     };
     running.type_this_capture.set(typed);
+    running.copy_this_capture.set(copied);
     running.reopen();
 }
 

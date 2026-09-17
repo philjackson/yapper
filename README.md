@@ -44,13 +44,18 @@ Bind `yapper --quick` to a key to start dictating from wherever you're working.
 For example, in Hyprland:
 
 ```ini
-bind = SUPER, D, exec, yapper --quick
+bind = SUPER, D, exec, yapper --quick --copy
 bind = SUPER, SHIFT, D, exec, yapper --quick --type
 ```
 
-`--type` types the transcript straight into whatever window has focus, as well
-as copying it, so you can keep one key for each. It needs
-[wtype](https://github.com/atx/wtype).
+Two flags decide what happens to the transcript, and they combine:
+
+| | |
+| --- | --- |
+| `--copy` | put it on the clipboard |
+| `--type` | type it into whatever window has focus, using [wtype](https://github.com/atx/wtype) |
+| both | do both |
+| neither | keep it in the history and leave everything else alone |
 
 <p align="center">
   <img src="docs/quick.png" alt="The quick capture panel" width="420">

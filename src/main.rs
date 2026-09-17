@@ -39,10 +39,10 @@ fn main() -> glib::ExitCode {
 
     // Quick capture hands the clipboard off and exits, so it needs a clipboard
     // that outlives the process. GTK's own does not.
-    if options.quick && !output::has_wl_copy() {
+    if options.quick && options.copy_output && !output::has_wl_copy() {
         eprintln!(
-            "yapper: quick capture needs wl-clipboard installed — GTK's own \
-             clipboard is dropped when the process exits"
+            "yapper: --copy needs wl-clipboard installed — GTK's own clipboard \
+             is dropped when the process exits"
         );
         return glib::ExitCode::FAILURE;
     }
@@ -76,10 +76,15 @@ fn main() -> glib::ExitCode {
 
     // And so a later --quick can say how it wants the transcript delivered.
     // Plain activation carries no arguments, which is why this is an action.
-    let capture = gtk::gio::SimpleAction::new("capture", Some(glib::VariantTy::BOOLEAN));
-    capture.connect_activate(|_, typed| {
-        let typed = typed.and_then(|typed| typed.get::<bool>()).unwrap_or(false);
-        ui::start_capture(typed);
+    let capture = gtk::gio::SimpleAction::new(
+        "capture",
+        Some(glib::VariantTy::new("(bb)").expect("a valid variant type")),
+    );
+    capture.connect_activate(|_, how| {
+        let (typed, copied) = how
+            .and_then(|how| how.get::<(bool, bool)>())
+            .unwrap_or((false, false));
+        ui::start_capture(typed, copied);
     });
     app.add_action(&capture);
 
@@ -94,7 +99,10 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::FAILURE;
         }
         if app.is_remote() {
-            app.activate_action("capture", Some(&options.type_output.to_variant()));
+            app.activate_action(
+                "capture",
+                Some(&(options.type_output, options.copy_output).to_variant()),
+            );
             if let Some(bus) = app.dbus_connection() {
                 let _ = bus.flush_sync(gtk::gio::Cancellable::NONE);
             }

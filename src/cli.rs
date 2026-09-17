@@ -16,8 +16,10 @@ pub struct Options {
     pub quick: bool,
     /// Tell the resident quick capture process to exit. Shows no window.
     pub stop_daemon: bool,
-    /// Type the transcript into the focused window as well as copying it.
+    /// Type the transcript into the focused window.
     pub type_output: bool,
+    /// Put the transcript on the clipboard.
+    pub copy_output: bool,
 }
 
 pub const USAGE: &str = "\
@@ -30,8 +32,11 @@ OPTIONS:
     -q, --quick      Quick capture: open as a floating panel, start recording
                      immediately, and copy the transcript to the clipboard on
                      close. Meant to be bound to a key.
-    -t, --type       With --quick: type the transcript into the focused window,
-                     as well as putting it on the clipboard. Needs wtype.
+    -t, --type       With --quick: type the transcript into the focused window.
+                     Needs wtype.
+    -c, --copy       With --quick: put the transcript on the clipboard.
+                     Combine with --type to do both. With neither, the
+                     transcript is only kept in the history.
     --stop-daemon    Stop the process quick capture leaves running, freeing
                      the memory the model holds. Shows no window.
     -h, --help       Print this help
@@ -55,6 +60,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Invocation {
             "-q" | "--quick" => options.quick = true,
             "--stop-daemon" => options.stop_daemon = true,
             "-t" | "--type" => options.type_output = true,
+            "-c" | "--copy" => options.copy_output = true,
             "-h" | "--help" => return Invocation::Help,
             "-V" | "--version" => return Invocation::Version,
             other => {
@@ -81,7 +87,8 @@ mod tests {
             Invocation::Run(Options {
                 quick: false,
                 stop_daemon: false,
-                type_output: false
+                type_output: false,
+                copy_output: false
             })
         ));
     }
@@ -110,20 +117,45 @@ mod tests {
     }
 
     #[test]
-    fn typing_can_be_asked_for_per_invocation() {
+    fn output_is_asked_for_per_invocation() {
+        let typed = parse_args(&["--quick", "--type"]);
         assert!(matches!(
-            parse_args(&["--quick", "--type"]),
+            typed,
             Invocation::Run(Options {
                 quick: true,
                 type_output: true,
+                copy_output: false,
                 ..
             })
         ));
+
+        let copied = parse_args(&["-q", "-c"]);
         assert!(matches!(
-            parse_args(&["-q", "-t"]),
+            copied,
             Invocation::Run(Options {
                 quick: true,
+                type_output: false,
+                copy_output: true,
+                ..
+            })
+        ));
+
+        let both = parse_args(&["--quick", "--type", "--copy"]);
+        assert!(matches!(
+            both,
+            Invocation::Run(Options {
                 type_output: true,
+                copy_output: true,
+                ..
+            })
+        ));
+
+        // Neither: the transcript is kept, and nothing else happens to it.
+        assert!(matches!(
+            parse_args(&["--quick"]),
+            Invocation::Run(Options {
+                type_output: false,
+                copy_output: false,
                 ..
             })
         ));
