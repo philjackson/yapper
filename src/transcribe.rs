@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::audio::rms;
 use crate::config::Config;
 
 /// Work sent from the UI to the worker.
@@ -28,7 +29,6 @@ pub enum Event {
     ModelFailed(String),
     /// A live transcript, superseded by the next one and finally by `Done`.
     Preview(String),
-    Transcribing,
     Done(String),
     Failed(String),
 }
@@ -114,13 +114,13 @@ pub fn spawn(config: &Config) -> Worker {
             };
 
             while let Ok(request) = request_rx.recv_blocking() {
+                let settings = worker_settings.lock().unwrap().clone();
                 match request {
                     Request::Preview(samples) => {
                         // Stale the moment the user stops talking.
                         if worker_interrupt.load(Ordering::Relaxed) {
                             continue;
                         }
-                        let settings = worker_settings.lock().unwrap().clone();
                         let abort = Arc::clone(&worker_interrupt);
                         let text = run(
                             &context,
@@ -137,8 +137,6 @@ pub fn spawn(config: &Config) -> Worker {
                     }
                     Request::Transcribe(samples) => {
                         worker_interrupt.store(false, Ordering::Relaxed);
-                        let settings = worker_settings.lock().unwrap().clone();
-                        let _ = event_tx.send_blocking(Event::Transcribing);
                         let event = match run(&context, &samples, &settings, None) {
                             Ok(text) => Event::Done(text),
                             Err(err) => Event::Failed(format!("{err:#}")),
@@ -164,7 +162,7 @@ fn load_model(path: &Path) -> Result<WhisperContext> {
             "model not found at {}\n\nRun ./scripts/fetch-model.sh to download one, or fetch a \
              ggml model by hand from\n{}\nand point Preferences at it.",
             path.display(),
-            crate::preferences::MODELS_URL
+            crate::config::MODELS_URL
         ));
     }
     let path = path
@@ -181,20 +179,11 @@ pub(crate) fn run(
     // Present for previews, which are allowed to give up part way.
     abort: Option<Box<dyn FnMut() -> bool + 'static>>,
 ) -> Result<String> {
-    let Settings {
-        silence_threshold: threshold,
-        language,
-        threads,
-        translate,
-        prompt,
-    } = settings;
-    let (threshold, threads, translate) = (*threshold, *threads, *translate);
-    let language = language.as_deref();
-    let prompt = prompt.as_deref();
-
     // Whisper invents speech when handed silence or a fragment, so screen both
     // out before they reach the model.
-    if samples.len() < crate::audio::TARGET_RATE as usize / 2 || is_silent(samples, threshold) {
+    if samples.len() < crate::audio::TARGET_RATE as usize / 2
+        || is_silent(samples, settings.silence_threshold)
+    {
         return Ok(String::new());
     }
 
@@ -206,13 +195,13 @@ pub(crate) fn run(
         params.set_temperature_inc(0.0);
         params.set_no_context(true);
     }
-    params.set_language(language);
+    params.set_language(settings.language.as_deref());
     // Context for the decoder: names and jargon it would otherwise guess at.
-    if let Some(prompt) = prompt {
+    if let Some(prompt) = settings.prompt.as_deref() {
         params.set_initial_prompt(prompt);
     }
-    params.set_n_threads(threads);
-    params.set_translate(translate);
+    params.set_n_threads(settings.threads);
+    params.set_translate(settings.translate);
     params.set_suppress_blank(true);
     params.set_suppress_nst(true);
     params.set_print_special(false);
@@ -250,14 +239,6 @@ fn is_silent(samples: &[f32], threshold: f32) -> bool {
 /// 30ms at 16 kHz: long enough to be a stable measure, short enough that one
 /// word registers.
 const SILENCE_BLOCK: usize = 480;
-
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_squares: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
-    (sum_squares / samples.len() as f64).sqrt() as f32
-}
 
 /// Whisper narrates non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and
 /// friends. Nobody wants that pasted into their editor.

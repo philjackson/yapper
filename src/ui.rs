@@ -15,7 +15,7 @@ use gtk::glib;
 use crate::audio::Recorder;
 use crate::cli::Options;
 use crate::config::Config;
-use crate::history::{Entry, History, relative_time};
+use crate::history::{Entry, History, mm_ss, relative_time, relative_time_at};
 use crate::preferences;
 use crate::output;
 use crate::players;
@@ -37,6 +37,10 @@ const PREVIEW_CHARS: usize = 150;
 /// Gaps between words are silence too. Waiting this long before showing the
 /// countdown keeps it from flickering on every breath.
 const COUNTDOWN_AFTER: f32 = 0.35;
+
+const LOADING: &str = "Loading model\u{2026}";
+const START_TOOLTIP: &str = "Start recording (Ctrl+Space)";
+const RECORDING_HINT: &str = "Enter to finish \u{00b7} Escape to discard";
 
 // The first launch builds the window and stays resident; later ones find this
 // process over D-Bus and land in `build` again with the model already loaded.
@@ -68,7 +72,6 @@ struct App {
     /// want different things.
     type_this_capture: Cell<bool>,
     copy_this_capture: Cell<bool>,
-    app: adw::Application,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
     history: RefCell<History>,
@@ -161,7 +164,6 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Center)
         .sensitive(false)
-        .tooltip_text("Start recording (Ctrl+Space)")
         .build();
 
     let overlay = gtk::Overlay::builder().child(&stage).build();
@@ -170,13 +172,13 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
 
     // --- Status ------------------------------------------------------------
 
+    // Text for these comes from `refresh_status`, which runs before the window
+    // is shown.
     let status_label = gtk::Label::builder()
-        .label("Loading model\u{2026}")
         .css_classes(["status"])
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
     let hint_label = gtk::Label::builder()
-        .label("Ctrl+Space to talk")
         .css_classes(["hint", "dim-label"])
         .build();
 
@@ -253,17 +255,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         .build();
     banner.connect_button_clicked({
         let window = window.clone();
-        move |_| {
-            gtk::UriLauncher::new(preferences::MODELS_URL).launch(
-                Some(&window),
-                gtk::gio::Cancellable::NONE,
-                |result| {
-                    if let Err(err) = result {
-                        eprintln!("yapper: could not open the models page: {err}");
-                    }
-                },
-            );
-        }
+        move |_| preferences::open_models_page(Some(window.upcast_ref()))
     });
 
     let content = gtk::Box::builder()
@@ -326,7 +318,6 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         quitting: Cell::new(false),
         type_this_capture: Cell::new(options.type_output),
         copy_this_capture: Cell::new(options.copy_output),
-        app: app.clone(),
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
         history: RefCell::new(history),
@@ -371,14 +362,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
 
     type_button.connect_clicked({
         let app_state = Rc::clone(&app_state);
-        move |_| {
-            let Some(entry) = app_state.selected_entry() else {
-                return;
-            };
-            if let Err(err) = output::type_text(&entry.text) {
-                app_state.toast(&format!("{err}"));
-            }
-        }
+        move |_| app_state.type_selected()
     });
 
     delete_button.connect_clicked({
@@ -422,7 +406,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     glib::timeout_add_local(PREVIEW_EVERY, {
         let app_state = Rc::clone(&app_state);
         move || {
-            if matches!(*app_state.state.borrow(), State::Recording) {
+            if app_state.is_recording() {
                 app_state.request_preview();
             }
             glib::ControlFlow::Continue
@@ -494,6 +478,10 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
 }
 
 impl App {
+    fn is_recording(&self) -> bool {
+        matches!(*self.state.borrow(), State::Recording)
+    }
+
     fn toggle(self: &Rc<Self>) {
         let state = self.state.borrow().clone();
         match state {
@@ -513,11 +501,11 @@ impl App {
             *self.paused_players.borrow_mut() = players::pause_playing();
         }
 
-        let (device, threshold) = {
+        let opened = {
             let config = self.config.borrow();
-            (config.input_device.clone(), config.silence_threshold)
+            Recorder::start(&config.input_device, config.silence_threshold)
         };
-        match Recorder::start(Some(&device), threshold) {
+        match opened {
             Ok(recorder) => {
                 *self.recorder.borrow_mut() = Some(recorder);
                 self.show_preview("");
@@ -601,7 +589,6 @@ impl App {
         drop(recorder);
         self.resume_players();
         self.show_preview("");
-        self.preview_label.set_visible(false);
         self.preview_pending.set(false);
         self.set_state(State::Idle);
 
@@ -643,57 +630,57 @@ impl App {
                 self.preview_pending.set(false);
                 // An empty preview means the pass failed or found nothing yet;
                 // keep whatever was on screen rather than blinking it away.
-                if !text.is_empty() && matches!(*self.state.borrow(), State::Recording) {
+                if !text.is_empty() && self.is_recording() {
                     self.show_preview(&text);
                 }
             }
-            Event::Transcribing => self.set_state(State::Working),
             Event::Done(text) => {
                 self.set_state(State::Idle);
                 if text.is_empty() {
                     self.report("No speech detected");
-                    if self.quick {
-                        self.retire();
-                    }
-                    return;
-                }
-                // Quick capture does what its flags asked for and nothing
-                // else; the window follows the settings. Asking for neither is
-                // a real answer: keep the transcript, touch nothing.
-                let (wants_copy, wants_typing) = if self.quick {
-                    (self.copy_this_capture.get(), self.type_this_capture.get())
                 } else {
-                    let config = self.config.borrow();
-                    (config.copy_to_clipboard, config.type_on_finish)
-                };
-
-                if wants_copy
-                    && let Err(err) = output::copy(&text)
-                {
-                    self.report(&format!("Copy failed: {err}"));
-                }
-                if wants_typing
-                    && let Err(err) = output::type_text(&text)
-                {
-                    self.report(&format!("{err}"));
-                }
-                if self.quick {
-                    self.show_preview(&text);
-                } else {
+                    self.deliver(&text);
                     self.show_preview("");
+                    self.remember(text);
                 }
-                self.remember(text);
-                if self.quick {
-                    self.retire();
-                }
+                self.finish_capture();
             }
             Event::Failed(err) => {
                 self.set_state(State::Idle);
                 self.report(&format!("Transcription failed: {err}"));
-                if self.quick {
-                    self.retire();
-                }
+                self.finish_capture();
             }
+        }
+    }
+
+    /// Copy and/or type the transcript. Quick capture does what its flags asked
+    /// for and nothing else; the window follows the settings. Asking for
+    /// neither is a real answer: keep the transcript, touch nothing.
+    fn deliver(&self, text: &str) {
+        let (wants_copy, wants_typing) = if self.quick {
+            (self.copy_this_capture.get(), self.type_this_capture.get())
+        } else {
+            let config = self.config.borrow();
+            (config.copy_to_clipboard, config.type_on_finish)
+        };
+
+        if wants_copy
+            && let Err(err) = output::copy(text)
+        {
+            self.report(&format!("Copy failed: {err}"));
+        }
+        if wants_typing
+            && let Err(err) = output::type_text(text)
+        {
+            self.report(&format!("{err}"));
+        }
+    }
+
+    /// The capture is over, one way or another. Quick capture puts the panel
+    /// away; the window just stays as it is.
+    fn finish_capture(self: &Rc<Self>) {
+        if self.quick {
+            self.retire();
         }
     }
 
@@ -707,17 +694,15 @@ impl App {
         self.rebuild_list(Some(0));
     }
 
-    fn selected_entry(&self) -> Option<Entry> {
-        let index = self.list.selected_row()?.index();
-        self.history
-            .borrow()
-            .entries()
-            .get(index as usize)
-            .cloned()
+    /// The selected row's position in the list and the entry it shows.
+    fn selected_entry(&self) -> Option<(usize, Entry)> {
+        let index = self.list.selected_row()?.index() as usize;
+        let entry = self.history.borrow().entries().get(index)?.clone();
+        Some((index, entry))
     }
 
     fn copy_selected(self: &Rc<Self>) {
-        let Some(entry) = self.selected_entry() else {
+        let Some((_, entry)) = self.selected_entry() else {
             return;
         };
         match output::copy(&entry.text) {
@@ -726,12 +711,17 @@ impl App {
         }
     }
 
-    fn delete_selected(self: &Rc<Self>) {
-        let Some(row) = self.list.selected_row() else {
+    fn type_selected(self: &Rc<Self>) {
+        let Some((_, entry)) = self.selected_entry() else {
             return;
         };
-        let index = row.index() as usize;
-        let Some(entry) = self.history.borrow().entries().get(index).cloned() else {
+        if let Err(err) = output::type_text(&entry.text) {
+            self.toast(&format!("{err}"));
+        }
+    }
+
+    fn delete_selected(self: &Rc<Self>) {
+        let Some((index, entry)) = self.selected_entry() else {
             return;
         };
 
@@ -757,9 +747,7 @@ impl App {
     }
 
     fn rebuild_list(self: &Rc<Self>, select: Option<usize>) {
-        while let Some(child) = self.list.first_child() {
-            self.list.remove(&child);
-        }
+        self.list.remove_all();
 
         let rows: Vec<adw::ActionRow> = self
             .history
@@ -788,9 +776,12 @@ impl App {
     /// Refresh the "5 minutes ago" subtitles in place, so the selection and the
     /// scroll position survive.
     fn restamp_rows(self: &Rc<Self>) {
+        let Ok(now) = glib::DateTime::now_local() else {
+            return;
+        };
         let history = self.history.borrow();
         for (row, entry) in self.rows.borrow().iter().zip(history.entries()) {
-            row.set_subtitle(&relative_time(entry.recorded_at()));
+            row.set_subtitle(&relative_time_at(entry.recorded_at(), &now));
         }
     }
 
@@ -826,7 +817,7 @@ impl App {
         self.last_frame.set(frame_time);
         let elapsed = (frame_time - self.first_frame.get()) as f32 / 1e6;
 
-        let recording = matches!(*self.state.borrow(), State::Recording);
+        let recording = self.is_recording();
         let level = if recording {
             self.recorder
                 .borrow()
@@ -860,29 +851,20 @@ impl App {
     /// How much of the silence timeout is left, as a fraction, or `None` when
     /// nothing is counting down.
     fn countdown(&self) -> Option<f32> {
-        if !matches!(*self.state.borrow(), State::Recording) {
+        if !self.is_recording() {
             return None;
         }
         let timeout = self.config.borrow().silence_timeout;
-        if timeout <= 0.0 {
-            return None;
-        }
         let silence = self.recorder.borrow().as_ref()?.silence_secs();
-        if silence < COUNTDOWN_AFTER {
-            return None;
-        }
-        Some(((timeout - silence) / timeout).clamp(0.0, 1.0))
+        silence_remaining(silence, timeout).map(|left| (left / timeout).clamp(0.0, 1.0))
     }
 
     /// What the line under the status says while recording.
     fn recording_hint(&self, silence: f32, timeout: f32) -> String {
-        if timeout > 0.0 && silence >= COUNTDOWN_AFTER {
-            return format!(
-                "Quiet \u{2014} stopping in {:.1}s",
-                (timeout - silence).max(0.0)
-            );
+        match silence_remaining(silence, timeout) {
+            Some(left) => format!("Quiet \u{2014} stopping in {left:.1}s"),
+            None => RECORDING_HINT.to_string(),
         }
-        "Enter to finish \u{00b7} Escape to discard".to_string()
     }
 
     /// Picks up SIGUSR1 and keeps the recording clock honest.
@@ -892,7 +874,7 @@ impl App {
             self.toggle();
         }
 
-        if !matches!(*self.state.borrow(), State::Recording) {
+        if !self.is_recording() {
             return;
         }
 
@@ -905,9 +887,7 @@ impl App {
             return;
         };
 
-        let secs = elapsed as u32;
-        self.status_label
-            .set_label(&format!("Listening  {}:{:02}", secs / 60, secs % 60));
+        self.status_label.set_label(&listening(elapsed as u32));
 
         let timeout = self.config.borrow().silence_timeout;
         self.hint_label
@@ -928,44 +908,48 @@ impl App {
 
     fn refresh_status(self: &Rc<Self>) {
         let state = self.state.borrow().clone();
+        // Quick capture has one way out, and the window's hints don't describe it.
+        let quick = self.quick;
         let (status, hint, tooltip, busy, can_record) = match &state {
             State::Loading => (
-                "Loading model\u{2026}".to_string(),
-                "Ready to record — the model is still loading",
-                "Start recording (Ctrl+Space)",
+                LOADING.to_string(),
+                if quick { LOADING } else { "Ready to record — the model is still loading" },
+                START_TOOLTIP,
                 true,
                 true,
             ),
             State::Idle => (
                 "Ready".to_string(),
-                "Ctrl+Space to talk",
-                "Start recording (Ctrl+Space)",
+                if quick { "Escape to close" } else { "Ctrl+Space to talk" },
+                START_TOOLTIP,
                 false,
                 true,
             ),
             State::Recording => (
-                "Listening  0:00".to_string(),
-                "Enter to finish \u{00b7} Escape to discard",
+                listening(0),
+                RECORDING_HINT,
                 "Finish recording (Enter)",
                 false,
                 true,
             ),
             State::Working => (
                 "Transcribing\u{2026}".to_string(),
-                "Hang on",
+                if quick { "Copying to the clipboard\u{2026}" } else { "Hang on" },
                 "Transcribing",
                 true,
                 false,
             ),
-            State::Broken(err) => (err.clone(), "", "Unavailable", false, false),
+            State::Broken(err) => (
+                err.clone(),
+                if quick { "Escape to close" } else { "" },
+                "Unavailable",
+                false,
+                false,
+            ),
         };
 
         self.status_label.set_label(&status);
-        self.hint_label.set_label(if self.quick {
-            quick_hint(&state)
-        } else {
-            hint
-        });
+        self.hint_label.set_label(hint);
         self.mic_button.set_tooltip_text(Some(tooltip));
         self.mic_button.set_sensitive(can_record);
         self.mic_pages
@@ -1038,14 +1022,16 @@ impl App {
 
     fn quit(&self) {
         self.quitting.set(true);
-        self.app.quit();
+        if let Some(app) = self.window.application() {
+            app.quit();
+        }
     }
 
     /// A later launch, arriving at the instance that is already running.
     fn reopen(self: &Rc<Self>) {
         self.window.present();
         // Opening quick capture means starting a recording; that is the verb.
-        if self.quick && matches!(*self.state.borrow(), State::Idle) {
+        if self.quick && *self.state.borrow() == State::Idle {
             self.start_recording();
         }
     }
@@ -1054,7 +1040,6 @@ impl App {
     fn retire(self: &Rc<Self>) {
         self.window.set_visible(false);
         self.show_preview("");
-        self.preview_label.set_visible(false);
         self.set_state(State::Idle);
     }
 }
@@ -1068,7 +1053,8 @@ fn float_above_everything(window: &adw::ApplicationWindow) {
 
     if !gtk_layer_shell::is_supported() {
         eprintln!(
-            "yapper: this compositor has no layer-shell, falling back to an              ordinary window — float it with a rule on app id dev.yapper.Yapper.Quick"
+            "yapper: this compositor has no layer-shell, falling back to an \
+             ordinary window — float it with a rule on app id dev.yapper.Yapper.Quick"
         );
         return;
     }
@@ -1081,14 +1067,15 @@ fn float_above_everything(window: &adw::ApplicationWindow) {
     // No anchors, so the compositor centres the surface.
 }
 
-/// Quick capture has one way out, and the normal window's hints don't describe it.
-fn quick_hint(state: &State) -> &'static str {
-    match state {
-        State::Recording => "Enter to finish \u{00b7} Escape to discard",
-        State::Working => "Copying to the clipboard\u{2026}",
-        State::Loading => "Loading model\u{2026}",
-        _ => "Escape to close",
-    }
+/// Seconds of the silence timeout still to run, once the room has been quiet
+/// long enough for the countdown to show. `None` when nothing is counting down.
+fn silence_remaining(silence: f32, timeout: f32) -> Option<f32> {
+    (timeout > 0.0 && silence >= COUNTDOWN_AFTER).then(|| (timeout - silence).max(0.0))
+}
+
+/// The status line while recording.
+fn listening(secs: u32) -> String {
+    format!("Listening  {}", mm_ss(secs))
 }
 
 /// The last `max_chars` or so of `text`, cut at a word boundary. The newest
@@ -1179,83 +1166,59 @@ fn install_signal_handler() {
 }
 
 fn install_shortcuts(window: &adw::ApplicationWindow, app_state: &Rc<App>) {
+    use glib::Propagation::{Proceed, Stop};
+
     let controller = gtk::ShortcutController::new();
     controller.set_scope(gtk::ShortcutScope::Global);
 
-    let toggle = gtk::CallbackAction::new({
+    let bind = |trigger: &str, action: fn(&Rc<App>) -> glib::Propagation| {
         let app_state = Rc::clone(app_state);
-        move |_, _| {
-            app_state.toggle();
-            glib::Propagation::Stop
-        }
+        controller.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string(trigger),
+            Some(gtk::CallbackAction::new(move |_, _| action(&app_state))),
+        ));
+    };
+
+    bind("<Control>space", |app| {
+        app.toggle();
+        Stop
     });
-    controller.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("<Control>space"),
-        Some(toggle),
-    ));
 
     // Escape throws the recording away; Enter or Space keeps it. Two explicit
     // endings, so neither can happen by accident.
-    let discard = gtk::CallbackAction::new({
-        let app_state = Rc::clone(app_state);
-        move |_, _| {
-            if matches!(*app_state.state.borrow(), State::Recording) {
-                app_state.cancel_recording();
-                return glib::Propagation::Stop;
-            }
-            if app_state.quick {
-                app_state.dismiss();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
+    bind("Escape", |app| {
+        if app.quick {
+            app.dismiss();
+            Stop
+        } else if app.is_recording() {
+            app.cancel_recording();
+            Stop
+        } else {
+            Proceed
         }
     });
-    controller.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("Escape"),
-        Some(discard),
-    ));
 
-    let finish = gtk::CallbackAction::new({
-        let app_state = Rc::clone(app_state);
-        move |_, _| {
-            if matches!(*app_state.state.borrow(), State::Recording) {
-                app_state.stop_recording();
-                return glib::Propagation::Stop;
-            }
+    bind("Return|KP_Enter|space", |app| {
+        if app.is_recording() {
+            app.stop_recording();
+            Stop
+        } else {
             // Not recording: leave Enter and Space to the focused widget.
-            glib::Propagation::Proceed
+            Proceed
         }
     });
-    controller.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("Return|KP_Enter|space"),
-        Some(finish),
-    ));
 
     // Ctrl+C rather than Enter: it works wherever the focus happens to be, and
     // it cannot swallow Enter from a focused button the way a bare Return can.
-    let copy = gtk::CallbackAction::new({
-        let app_state = Rc::clone(app_state);
-        move |_, _| {
-            app_state.copy_selected();
-            glib::Propagation::Stop
-        }
+    bind("<Control>c", |app| {
+        app.copy_selected();
+        Stop
     });
-    controller.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("<Control>c"),
-        Some(copy),
-    ));
 
-    let delete = gtk::CallbackAction::new({
-        let app_state = Rc::clone(app_state);
-        move |_, _| {
-            app_state.delete_selected();
-            glib::Propagation::Stop
-        }
+    bind("Delete", |app| {
+        app.delete_selected();
+        Stop
     });
-    controller.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("Delete"),
-        Some(delete),
-    ));
 
     window.add_controller(controller);
 }

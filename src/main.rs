@@ -94,19 +94,11 @@ fn main() -> glib::ExitCode {
     // passing on how the transcript should be delivered. Without this the flag
     // would be quietly ignored by whichever invocation happened to start first.
     if options.quick {
-        if let Err(err) = app.register(gtk::gio::Cancellable::NONE) {
-            eprintln!("yapper: cannot reach the session bus: {err}");
-            return glib::ExitCode::FAILURE;
-        }
-        if app.is_remote() {
-            app.activate_action(
-                "capture",
-                Some(&(options.type_output, options.copy_output).to_variant()),
-            );
-            if let Some(bus) = app.dbus_connection() {
-                let _ = bus.flush_sync(gtk::gio::Cancellable::NONE);
-            }
-            return glib::ExitCode::SUCCESS;
+        let how = (options.type_output, options.copy_output).to_variant();
+        match hand_to_running(&app, "capture", Some(&how)) {
+            Ok(true) => return glib::ExitCode::SUCCESS,
+            Ok(false) => {}
+            Err(code) => return code,
         }
     }
 
@@ -123,22 +115,34 @@ fn main() -> glib::ExitCode {
 /// stop.
 fn stop_daemon() -> glib::ExitCode {
     let app = gtk::gio::Application::new(Some(QUICK_APP_ID), gtk::gio::ApplicationFlags::empty());
+    match hand_to_running(&app, "quit", None) {
+        Ok(true) => println!("yapper: quick capture stopped"),
+        Ok(false) => println!("yapper: no quick capture process running"),
+        Err(code) => return code,
+    }
+    glib::ExitCode::SUCCESS
+}
 
+/// Register on the session bus and, if another instance already owns the id,
+/// hand it `action`. Returns whether there was one to hand it to; the error
+/// is the exit code to leave with when the bus cannot be reached at all.
+fn hand_to_running(
+    app: &impl IsA<gtk::gio::Application>,
+    action: &str,
+    parameter: Option<&glib::Variant>,
+) -> Result<bool, glib::ExitCode> {
     if let Err(err) = app.register(gtk::gio::Cancellable::NONE) {
         eprintln!("yapper: cannot reach the session bus: {err}");
-        return glib::ExitCode::FAILURE;
+        return Err(glib::ExitCode::FAILURE);
     }
-
     if !app.is_remote() {
-        println!("yapper: no quick capture process running");
-        return glib::ExitCode::SUCCESS;
+        return Ok(false);
     }
-
-    app.activate_action("quit", None);
+    let app: &gtk::gio::Application = app.as_ref();
+    app.activate_action(action, parameter);
     // The message is queued on the bus; leaving now could drop it.
     if let Some(bus) = app.dbus_connection() {
         let _ = bus.flush_sync(gtk::gio::Cancellable::NONE);
     }
-    println!("yapper: quick capture stopped");
-    glib::ExitCode::SUCCESS
+    Ok(true)
 }

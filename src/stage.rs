@@ -149,13 +149,8 @@ impl Bars {
                 if x < 0.0 || x + BAR_WIDTH > width {
                     continue;
                 }
-                cr.set_source_rgba(
-                    accent.red() as f64,
-                    accent.green() as f64,
-                    accent.blue() as f64,
-                    alpha,
-                );
-                rounded_bar(cr, x, cy - bar_height / 2.0, BAR_WIDTH, bar_height);
+                set_accent(cr, accent, alpha);
+                pill(cr, x, cy - bar_height / 2.0, BAR_WIDTH, bar_height);
                 let _ = cr.fill();
             }
         }
@@ -163,26 +158,18 @@ impl Bars {
 
     /// Rings expanding out from under the button while recording.
     fn draw_pulse(&self, cr: &cairo::Context, cx: f64, cy: f64, accent: gdk::RGBA) {
+        // One ring every ~1.1 seconds.
+        let pulse_phase = (self.elapsed as f64 * 0.9).fract();
         for ring in 0..2 {
             // The two rings are half a cycle apart so one is always visible.
-            let progress = ((self.pulse_phase() + ring as f64 * 0.5) % 1.0).clamp(0.0, 1.0);
+            let progress = ((pulse_phase + ring as f64 * 0.5) % 1.0).clamp(0.0, 1.0);
             let radius = BUTTON_RADIUS + progress * 30.0;
             let alpha = (1.0 - progress) * 0.22 * self.intensity as f64;
-            cr.set_source_rgba(
-                accent.red() as f64,
-                accent.green() as f64,
-                accent.blue() as f64,
-                alpha,
-            );
+            set_accent(cr, accent, alpha);
             cr.set_line_width(2.5);
             cr.arc(cx, cy, radius, 0.0, TAU);
             let _ = cr.stroke();
         }
-    }
-
-    /// One ring every ~1.1 seconds.
-    fn pulse_phase(&self) -> f64 {
-        (self.elapsed as f64 * 0.9).fract()
     }
 }
 
@@ -213,8 +200,18 @@ fn draw_countdown(cr: &cairo::Context, cx: f64, cy: f64, remaining: f32) {
     let _ = cr.stroke();
 }
 
-/// A vertical pill: a rectangle with fully rounded ends.
-fn rounded_bar(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64) {
+/// The accent colour at the given opacity.
+fn set_accent(cr: &cairo::Context, accent: gdk::RGBA, alpha: f64) {
+    cr.set_source_rgba(
+        accent.red() as f64,
+        accent.green() as f64,
+        accent.blue() as f64,
+        alpha,
+    );
+}
+
+/// A pill: a rectangle with fully rounded ends, whichever way it is longer.
+pub(crate) fn pill(cr: &cairo::Context, x: f64, y: f64, width: f64, height: f64) {
     let radius = (width / 2.0).min(height / 2.0);
     cr.new_sub_path();
     cr.arc(x + width - radius, y + radius, radius, -FRAC_PI_2, 0.0);

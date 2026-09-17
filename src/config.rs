@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Where the ggml models live. The same place `scripts/fetch-model.sh` pulls
+/// from, so the two never disagree.
+pub const MODELS_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/tree/main";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -119,15 +123,11 @@ impl Config {
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("yapper/config.toml")
+    gtk::glib::user_config_dir().join("yapper/config.toml")
 }
 
 pub fn models_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("yapper/models")
+    gtk::glib::user_data_dir().join("yapper/models")
 }
 
 fn default_model_path() -> PathBuf {

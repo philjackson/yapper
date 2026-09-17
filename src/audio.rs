@@ -67,34 +67,27 @@ impl Recorder {
     /// id from [`input_devices`]; an empty or unknown one falls back to the
     /// system default, since an unplugged microphone should not stop yapper
     /// from recording at all.
-    pub fn start(wanted: Option<&str>, threshold: f32) -> Result<Self> {
+    pub fn start(wanted: &str, threshold: f32) -> Result<Self> {
         Self::open(wanted, threshold, true)
     }
 
     /// Levels only, for the microphone test: audio is measured and thrown away
     /// rather than accumulated.
-    pub fn monitor(wanted: Option<&str>, threshold: f32) -> Result<Self> {
+    pub fn monitor(wanted: &str, threshold: f32) -> Result<Self> {
         Self::open(wanted, threshold, false)
     }
 
-    fn open(wanted: Option<&str>, threshold: f32, retain: bool) -> Result<Self> {
+    fn open(wanted: &str, threshold: f32, retain: bool) -> Result<Self> {
         let host = cpal::default_host();
-        let device = wanted
-            .filter(|id| !id.is_empty())
-            .and_then(|id| match id.parse::<cpal::DeviceId>() {
-                Ok(id) => host.device_by_id(&id),
-                Err(err) => {
-                    eprintln!("yapper: cannot read input device id {id:?}: {err}");
-                    None
-                }
-            })
-            .or_else(|| {
-                if wanted.is_some_and(|id| !id.is_empty()) {
-                    eprintln!("yapper: chosen input device is not connected, using the default");
-                }
+        let device = if wanted.is_empty() {
+            host.default_input_device()
+        } else {
+            chosen_device(&host, wanted).or_else(|| {
+                eprintln!("yapper: chosen input device is not connected, using the default");
                 host.default_input_device()
             })
-            .ok_or_else(|| anyhow!("no input device available"))?;
+        }
+        .ok_or_else(|| anyhow!("no input device available"))?;
 
         let supported = pick_config(&device)?;
         let sample_format = supported.sample_format();
@@ -160,15 +153,8 @@ impl Recorder {
 
     /// Stop capturing and hand back 16 kHz mono audio ready for Whisper.
     pub fn finish(self) -> Vec<f32> {
-        let raw = {
-            let mut capture = self.capture.lock().unwrap();
-            std::mem::take(&mut capture.samples)
-        };
-        // Convert before dropping the stream, since prepare needs the
-        // stream's rate and channel count.
-        let prepared = self.prepare(raw);
-        drop(self._stream);
-        prepared
+        let raw = std::mem::take(&mut self.capture.lock().unwrap().samples);
+        self.prepare(raw)
     }
 
     fn prepare(&self, raw: Vec<f32>) -> Vec<f32> {
@@ -194,32 +180,54 @@ where
         .build_input_stream(
             *config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                let mut capture = capture.lock().unwrap();
-                capture.samples.reserve(data.len());
+                if data.is_empty() {
+                    return;
+                }
                 let mut sum_squares = 0.0f64;
+                let mut peak = 0.0f32;
                 for &sample in data {
                     let value = f32::from_sample(sample);
-                    if retain {
-                        capture.samples.push(value);
-                    }
                     sum_squares += (value as f64) * (value as f64);
-                    let magnitude = value.abs();
-                    if magnitude > capture.peak {
-                        capture.peak = magnitude;
-                    }
+                    peak = peak.max(value.abs());
                 }
                 // One RMS per callback buffer — a few tens of milliseconds,
                 // which is the right window for "is anyone talking".
-                if !data.is_empty() {
-                    let rms = (sum_squares / data.len() as f64).sqrt() as f32;
-                    capture.rms = rms;
-                    capture.silence.observe(rms, data.len() / channels);
+                let rms = (sum_squares / data.len() as f64).sqrt() as f32;
+
+                let mut capture = capture.lock().unwrap();
+                if retain {
+                    capture.samples.extend(data.iter().map(|&s| f32::from_sample(s)));
                 }
+                capture.peak = capture.peak.max(peak);
+                capture.rms = rms;
+                capture.silence.observe(rms, data.len() / channels);
             },
             err_fn,
             None,
         )
         .context("building the input stream")
+}
+
+/// The device a saved id names, if it is still connected.
+fn chosen_device(host: &cpal::Host, id: &str) -> Option<cpal::Device> {
+    match id.parse::<cpal::DeviceId>() {
+        Ok(id) => host.device_by_id(&id),
+        Err(err) => {
+            eprintln!("yapper: cannot read input device id {id:?}: {err}");
+            None
+        }
+    }
+}
+
+/// Root mean square of a block of samples: its loudness, as the silence
+/// threshold measures it. Shared with the transcriber so one setting means
+/// one thing on both sides.
+pub(crate) fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_squares: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+    (sum_squares / samples.len() as f64).sqrt() as f32
 }
 
 /// An input device a person might actually want to choose, with the id to
@@ -275,17 +283,16 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
 
     if let Ok(configs) = device.supported_input_configs() {
         for candidate in configs {
-            if format_rank(candidate.sample_format()).is_none() {
+            let Some(rank) = format_rank(candidate.sample_format()) else {
                 continue;
-            }
+            };
             if candidate.min_sample_rate() > TARGET_RATE
                 || candidate.max_sample_rate() < TARGET_RATE
             {
                 continue;
             }
             // Sample format dominates; channel count breaks ties.
-            let score = format_rank(candidate.sample_format()).unwrap() * 100
-                + u32::from(candidate.channels());
+            let score = rank * 100 + u32::from(candidate.channels());
             if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
                 best = Some((score, candidate));
             }
@@ -472,7 +479,7 @@ mod tests {
     #[test]
     #[ignore]
     fn monitor_reports_levels_without_keeping_audio() {
-        let recorder = Recorder::monitor(None, DEFAULT_SILENCE_RMS).expect("opening the device");
+        let recorder = Recorder::monitor("", DEFAULT_SILENCE_RMS).expect("opening the device");
         let mut highest = 0.0f32;
         for _ in 0..30 {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -490,7 +497,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_capture_produces_16k_mono_audio() {
-        let recorder = Recorder::start(None, DEFAULT_SILENCE_RMS).expect("opening the default input device");
+        let recorder = Recorder::start("", DEFAULT_SILENCE_RMS).expect("opening the default input device");
         std::thread::sleep(std::time::Duration::from_millis(500));
         let samples = recorder.finish();
         assert!(
@@ -499,12 +506,6 @@ mod tests {
             samples.len()
         );
     }
-}
-
-
-#[cfg(test)]
-mod device_tests {
-    use super::*;
 
     /// What the picker will show: `cargo test -- --ignored --nocapture offered_microphones`
     #[test]
@@ -521,8 +522,8 @@ mod device_tests {
     #[test]
     #[ignore]
     fn opens_the_chosen_device() {
-        let wanted = std::env::var("YAPPER_TEST_DEVICE").ok();
-        let recorder = Recorder::start(wanted.as_deref(), DEFAULT_SILENCE_RMS).expect("opening the device");
+        let wanted = std::env::var("YAPPER_TEST_DEVICE").unwrap_or_default();
+        let recorder = Recorder::start(&wanted, DEFAULT_SILENCE_RMS).expect("opening the device");
         std::thread::sleep(std::time::Duration::from_millis(400));
         let samples = recorder.finish();
         println!("  captured {} samples at 16 kHz mono", samples.len());

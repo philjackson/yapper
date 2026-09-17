@@ -1,8 +1,13 @@
 //! Getting the transcript out of the window and into whatever you were typing in.
 
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow};
+
+use crate::history::plural;
+
+const TYPING_TOOL: &str = "wtype";
 
 /// Copy via `wl-copy` when it exists: unlike GTK's own clipboard, its contents
 /// survive yapper exiting. Falls back to the GTK clipboard otherwise.
@@ -17,17 +22,14 @@ pub fn copy(text: &str) -> Result<()> {
 }
 
 fn copy_to_clipboard(text: &str) -> Result<()> {
-    if which("wl-copy").is_some() {
-        let mut child = Command::new("wl-copy")
+    if has_wl_copy() {
+        let mut child = quiet("wl-copy")
             .arg("--")
             .arg(text)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .context("running wl-copy")?;
         // wl-copy daemonises itself, so this returns promptly.
-        child.wait().ok();
+        let _ = child.wait();
         return Ok(());
     }
 
@@ -41,28 +43,22 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 /// person counting them would say too.
 fn copied_message(text: &str) -> String {
     let words = text.split_whitespace().count();
-    format!(
-        "Copied {words} word{} to the clipboard",
-        if words == 1 { "" } else { "s" }
-    )
+    format!("Copied {words} word{} to the clipboard", plural(words))
 }
 
 /// Best effort: no notification daemon, or no notify-send, is not an error
 /// worth interrupting a dictation for.
 fn notify(body: &str) {
-    if which("notify-send").is_none() {
+    if !installed("notify-send") {
         return;
     }
-    let sent = Command::new("notify-send")
+    let sent = quiet("notify-send")
         .args([
             "--app-name=yapper",
             "--icon=audio-input-microphone",
             "--expire-time=3000",
             body,
         ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn();
     // Reaped rather than left behind, so a long-lived window doesn't collect
     // zombies. notify-send returns as soon as the daemon has the message.
@@ -71,19 +67,18 @@ fn notify(body: &str) {
     }
 }
 
-
 /// Whether `wl-copy` is available. It matters because its clipboard survives
 /// yapper exiting, while GTK's own does not.
 pub fn has_wl_copy() -> bool {
-    which("wl-copy").is_some()
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| installed("wl-copy"))
 }
 
 /// Whether we can type into the focused window.
 pub fn can_type() -> bool {
-    which(TYPING_TOOL).is_some()
+    static FOUND: OnceLock<bool> = OnceLock::new();
+    *FOUND.get_or_init(|| installed(TYPING_TOOL))
 }
-
-const TYPING_TOOL: &str = "wtype";
 
 /// Type the text into whichever window has focus.
 pub fn type_text(text: &str) -> Result<()> {
@@ -102,11 +97,19 @@ pub fn type_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn which(program: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
+fn installed(program: &str) -> bool {
+    gtk::glib::find_program_in_path(program).is_some()
+}
+
+/// A command with nothing attached to the terminal, for helpers whose output
+/// is noise.
+fn quiet(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 #[cfg(test)]

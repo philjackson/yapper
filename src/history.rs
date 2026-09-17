@@ -34,8 +34,7 @@ impl Entry {
     }
 
     pub fn duration_label(&self) -> String {
-        let secs = self.duration_secs.round() as u32;
-        format!("{}:{:02}", secs / 60, secs % 60)
+        mm_ss(self.duration_secs.round() as u32)
     }
 }
 
@@ -61,12 +60,12 @@ impl History {
             Ok(text) => text
                 .lines()
                 .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| match serde_json::from_str::<Entry>(line) {
-                    Ok(entry) => Some(entry),
-                    Err(err) => {
-                        eprintln!("yapper: skipping unreadable history entry: {err}");
-                        None
-                    }
+                .filter_map(|line| {
+                    serde_json::from_str::<Entry>(line)
+                        .inspect_err(|err| {
+                            eprintln!("yapper: skipping unreadable history entry: {err}")
+                        })
+                        .ok()
                 })
                 .collect(),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -141,10 +140,12 @@ impl History {
 }
 
 pub fn history_path() -> PathBuf {
-    dirs::state_dir()
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("yapper/history.jsonl")
+    gtk::glib::user_state_dir().join("yapper/history.jsonl")
+}
+
+/// Minutes and seconds, as a clock would show them: `1:05`.
+pub fn mm_ss(secs: u32) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// Unix microseconds, nudged forward if the clock hasn't moved since the last
@@ -162,13 +163,17 @@ fn unique_id(newest: Option<i64>) -> i64 {
 
 /// "just now", "12 minutes ago", "Yesterday 14:05", "3 days ago", then a date.
 pub fn relative_time(unix_secs: i64) -> String {
-    let (Ok(then), Ok(now)) = (
-        gtk::glib::DateTime::from_unix_local(unix_secs),
-        gtk::glib::DateTime::now_local(),
-    ) else {
-        return String::new();
-    };
-    describe(&then, &now)
+    gtk::glib::DateTime::now_local()
+        .map(|now| relative_time_at(unix_secs, &now))
+        .unwrap_or_default()
+}
+
+/// As [`relative_time`], against a `now` the caller already has. Restamping a
+/// whole list wants one clock reading, not one per row.
+pub fn relative_time_at(unix_secs: i64, now: &gtk::glib::DateTime) -> String {
+    gtk::glib::DateTime::from_unix_local(unix_secs)
+        .map(|then| describe(&then, now))
+        .unwrap_or_default()
 }
 
 fn describe(then: &gtk::glib::DateTime, now: &gtk::glib::DateTime) -> String {
@@ -176,11 +181,6 @@ fn describe(then: &gtk::glib::DateTime, now: &gtk::glib::DateTime) -> String {
     // Calendar days, not elapsed 24-hour periods: 11pm yesterday to 9am today
     // is "Yesterday", however few hours that actually is.
     let days = calendar_days_between(then, now);
-
-    let time_of_day = then
-        .format("%H:%M")
-        .map(|formatted| formatted.to_string())
-        .unwrap_or_default();
 
     if days == 0 {
         let minutes = seconds / 60;
@@ -194,6 +194,10 @@ fn describe(then: &gtk::glib::DateTime, now: &gtk::glib::DateTime) -> String {
             format!("{hours} hour{} ago", plural(hours))
         }
     } else if days == 1 {
+        let time_of_day = then
+            .format("%H:%M")
+            .map(|formatted| formatted.to_string())
+            .unwrap_or_default();
         format!("Yesterday {time_of_day}")
     } else if days < 7 {
         format!("{days} days ago")
@@ -224,8 +228,9 @@ fn calendar_days_between(then: &gtk::glib::DateTime, now: &gtk::glib::DateTime) 
     }
 }
 
-fn plural(n: i64) -> &'static str {
-    if n == 1 { "" } else { "s" }
+/// The suffix that makes `word` into `words`, for any count but one.
+pub fn plural<N: PartialEq + From<u8>>(n: N) -> &'static str {
+    if n == N::from(1) { "" } else { "s" }
 }
 
 #[cfg(test)]

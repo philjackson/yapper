@@ -9,17 +9,41 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 
-use crate::config::{Config, models_dir};
-
-/// Where the ggml models live. The same place `scripts/fetch-model.sh` pulls
-/// from, so the two never disagree.
-pub const MODELS_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/tree/main";
+use crate::config::{Config, MODELS_URL, models_dir};
 
 /// Called after every change, with the updated config.
 pub type OnChange = Rc<dyn Fn(&Config)>;
 
+/// The dialog's copy of the config and the hook that tells the window about
+/// edits. Every row changes a setting the same way: mutate, save, notify.
+struct Prefs {
+    config: RefCell<Config>,
+    on_change: OnChange,
+}
+
+impl Prefs {
+    fn get<T>(&self, read: impl FnOnce(&Config) -> T) -> T {
+        read(&self.config.borrow())
+    }
+
+    /// Apply an edit, write the file and tell the window. A failed write is
+    /// worth saying out loud but not worth losing the change the user just
+    /// made in the running session.
+    fn update(&self, edit: impl FnOnce(&mut Config)) {
+        let mut config = self.config.borrow_mut();
+        edit(&mut config);
+        if let Err(err) = config.save() {
+            eprintln!("yapper: could not save preferences: {err:#}");
+        }
+        (self.on_change)(&config);
+    }
+}
+
 pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnChange) {
-    let config = Rc::new(RefCell::new(config.clone()));
+    let prefs = Rc::new(Prefs {
+        config: RefCell::new(config.clone()),
+        on_change,
+    });
 
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
@@ -27,29 +51,35 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
         .build();
     let page = adw::PreferencesPage::new();
 
-    page.add(&transcription_group(parent, &config, &on_change));
-    page.add(&vocabulary_group(&config, &on_change));
-    page.add(&output_group(&config, &on_change));
-    page.add(&window_group(&config, &on_change));
+    page.add(&transcription_group(parent, &prefs));
+    page.add(&vocabulary_group(&prefs));
+    page.add(&output_group(&prefs));
+    page.add(&window_group(&prefs));
 
     dialog.add(&page);
     dialog.present(Some(parent));
 }
 
-fn transcription_group(
-    parent: &impl IsA<gtk::Widget>,
-    config: &Rc<RefCell<Config>>,
-    on_change: &OnChange,
-) -> adw::PreferencesGroup {
+/// Open the page the models come from, in the browser.
+pub fn open_models_page(parent: Option<&gtk::Window>) {
+    gtk::UriLauncher::new(MODELS_URL).launch(parent, gtk::gio::Cancellable::NONE, |result| {
+        if let Err(err) = result {
+            eprintln!("yapper: could not open {MODELS_URL}: {err}");
+        }
+    });
+}
+
+fn transcription_group(parent: &impl IsA<gtk::Widget>, prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Transcription")
         .description("The model is loaded once, so a new one takes effect next time yapper starts")
         .build();
+    let window = parent.root().and_downcast::<gtk::Window>();
 
     // --- model -------------------------------------------------------------
     let model_row = adw::ActionRow::builder()
         .title("Model")
-        .subtitle(config.borrow().model_path.display().to_string())
+        .subtitle(prefs.get(|c| c.model_path.display().to_string()))
         .subtitle_lines(2)
         .build();
     let choose = gtk::Button::builder()
@@ -57,9 +87,8 @@ fn transcription_group(
         .valign(gtk::Align::Center)
         .build();
     choose.connect_clicked({
-        let parent = parent.as_ref().clone();
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
+        let window = window.clone();
+        let prefs = Rc::clone(prefs);
         let model_row = model_row.clone();
         move |_| {
             let filter = gtk::FileFilter::new();
@@ -72,9 +101,7 @@ fn transcription_group(
                 .initial_folder(&gtk::gio::File::for_path(models_dir()))
                 .build();
 
-            let window = parent.root().and_downcast::<gtk::Window>();
-            let config = Rc::clone(&config);
-            let on_change = Rc::clone(&on_change);
+            let prefs = Rc::clone(&prefs);
             let model_row = model_row.clone();
             dialog.open(window.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
                 // Cancelling is a normal outcome, not an error worth reporting.
@@ -82,8 +109,7 @@ fn transcription_group(
                     return;
                 };
                 model_row.set_subtitle(&path.display().to_string());
-                config.borrow_mut().model_path = path;
-                save(&config, &on_change);
+                prefs.update(|c| c.model_path = path);
             });
         }
     });
@@ -103,94 +129,54 @@ fn transcription_group(
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
-    browse.connect_clicked({
-        let parent = parent.as_ref().clone();
-        move |_| {
-            let window = parent.root().and_downcast::<gtk::Window>();
-            gtk::UriLauncher::new(MODELS_URL).launch(
-                window.as_ref(),
-                gtk::gio::Cancellable::NONE,
-                |result| {
-                    if let Err(err) = result {
-                        eprintln!("yapper: could not open {MODELS_URL}: {err}");
-                    }
-                },
-            );
-        }
-    });
+    browse.connect_clicked(move |_| open_models_page(window.as_ref()));
     get_models.add_suffix(&browse);
     get_models.set_activatable_widget(Some(&browse));
     group.add(&get_models);
 
     // --- language ----------------------------------------------------------
-    let language = adw::EntryRow::builder()
-        .title("Language")
-        .text(&config.borrow().language)
-        .build();
-    language.set_tooltip_text(Some(
+    let language = entry_row(
+        prefs,
+        "Language",
         "An ISO code such as en or de, or auto to detect it from the speech",
-    ));
-    language.connect_changed({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            let text = row.text().trim().to_string();
+        |c| c.language.clone(),
+        |c, text| {
+            let text = text.trim();
             // An empty box means "auto" rather than a broken setting.
-            config.borrow_mut().language = if text.is_empty() {
-                "auto".to_string()
-            } else {
-                text
-            };
-            save(&config, &on_change);
-        }
-    });
+            c.language = if text.is_empty() { "auto" } else { text }.to_string();
+        },
+    );
     group.add(&language);
 
-    // --- translate ---------------------------------------------------------
-    let translate = adw::SwitchRow::builder()
-        .title("Translate to English")
-        .subtitle("Transcribe speech in other languages as English")
-        .active(config.borrow().translate)
-        .build();
-    translate.connect_active_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().translate = row.is_active();
-            save(&config, &on_change);
-        }
-    });
-    group.add(&translate);
+    group.add(&switch_row(
+        prefs,
+        "Translate to English",
+        Some("Transcribe speech in other languages as English"),
+        |c| c.translate,
+        |c, on| c.translate = on,
+    ));
 
-    // --- threads -----------------------------------------------------------
-    let threads = adw::SpinRow::builder()
-        .title("Threads")
-        .subtitle("0 picks a sensible number from the CPU count")
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().threads as f64,
-            0.0,
-            64.0,
-            1.0,
-            4.0,
-            0.0,
-        ))
-        .build();
-    threads.connect_value_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().threads = row.value() as u32;
-            save(&config, &on_change);
-        }
-    });
-    group.add(&threads);
+    group.add(&spin_row(
+        prefs,
+        "Threads",
+        "0 picks a sensible number from the CPU count",
+        SpinRange {
+            lower: 0.0,
+            upper: 64.0,
+            step: 1.0,
+            page: 4.0,
+            digits: 0,
+        },
+        |c| c.threads as f64,
+        |c, value| c.threads = value as u32,
+    ));
 
     group
 }
 
 /// The whole point of this group is the description: an empty box with the
 /// word "Vocabulary" over it tells nobody what to type in it.
-fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
+fn vocabulary_group(prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Vocabulary")
         .description(
@@ -203,22 +189,13 @@ fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::
         )
         .build();
 
-    let prompt = adw::EntryRow::builder()
-        .title("Words to expect")
-        .text(&config.borrow().initial_prompt)
-        .build();
-    prompt.set_tooltip_text(Some(
+    group.add(&entry_row(
+        prefs,
+        "Words to expect",
         "Passed to Whisper as context for every transcription. Leave empty for none.",
+        |c| c.initial_prompt.clone(),
+        |c, text| c.initial_prompt = text.to_string(),
     ));
-    prompt.connect_changed({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().initial_prompt = row.text().to_string();
-            save(&config, &on_change);
-        }
-    });
-    group.add(&prompt);
 
     group
 }
@@ -228,7 +205,7 @@ fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::
 /// A threshold is impossible to set as a bare number — 0.004 means nothing
 /// until you can see where your own voice falls against it. Speak, watch the
 /// bar, and put the line under it.
-fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config>>, on_change: &OnChange) {
+fn add_microphone_test(group: &adw::PreferencesGroup, prefs: &Rc<Prefs>) {
     let level = Rc::new(Cell::new(0.0f32));
     let recorder: Rc<RefCell<Option<crate::audio::Recorder>>> = Rc::new(RefCell::new(None));
 
@@ -242,22 +219,21 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
         .build();
 
     meter.set_draw_func({
-        let config = Rc::clone(config);
+        let prefs = Rc::clone(prefs);
         let level = Rc::clone(&level);
         move |_, cr, width, height| {
             let (width, height) = (width as f64, height as f64);
-            let radius = height / 2.0;
-            let threshold = config.borrow().silence_threshold;
+            let threshold = prefs.get(|c| c.silence_threshold);
 
             // Track.
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
-            rounded(cr, 0.0, 0.0, width, height, radius);
+            crate::stage::pill(cr, 0.0, 0.0, width, height);
             let _ = cr.fill();
 
             // Everything else is clipped to the track, so neither the level nor
             // the threshold mark can spill past its rounded ends.
             let _ = cr.save();
-            rounded(cr, 0.0, 0.0, width, height, radius);
+            crate::stage::pill(cr, 0.0, 0.0, width, height);
             cr.clip();
 
             // Square-rooted, because speech and room tone are orders of
@@ -309,7 +285,7 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
     row.set_activatable_widget(Some(&test));
 
     test.connect_toggled({
-        let config = Rc::clone(config);
+        let prefs = Rc::clone(prefs);
         let recorder = Rc::clone(&recorder);
         let level = Rc::clone(&level);
         let meter = meter.clone();
@@ -321,63 +297,55 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
                 return;
             }
 
-            let (device, threshold) = {
-                let config = config.borrow();
-                (config.input_device.clone(), config.silence_threshold)
-            };
-            match crate::audio::Recorder::monitor(Some(&device), threshold) {
+            let (device, threshold) = prefs.get(|c| (c.input_device.clone(), c.silence_threshold));
+            match crate::audio::Recorder::monitor(&device, threshold) {
                 Ok(open) => *recorder.borrow_mut() = Some(open),
                 Err(err) => {
                     eprintln!("yapper: cannot open the microphone: {err:#}");
                     button.set_active(false);
+                    return;
                 }
             }
+
+            // Feed the meter for as long as the test runs, then stop.
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), {
+                let recorder = Rc::clone(&recorder);
+                let level = Rc::clone(&level);
+                let meter = meter.downgrade();
+                move || {
+                    let (Some(meter), Some(rms)) = (
+                        meter.upgrade(),
+                        recorder.borrow().as_ref().map(|open| open.current_rms()),
+                    ) else {
+                        return gtk::glib::ControlFlow::Break;
+                    };
+                    level.set(rms);
+                    meter.queue_draw();
+                    gtk::glib::ControlFlow::Continue
+                }
+            });
         }
     });
 
-    // Only runs while something is being monitored.
-    gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), {
-        let recorder = Rc::clone(&recorder);
-        let level = Rc::clone(&level);
-        let meter = meter.downgrade();
-        move || {
-            let Some(meter) = meter.upgrade() else {
-                return gtk::glib::ControlFlow::Break;
-            };
-            if let Some(open) = recorder.borrow().as_ref() {
-                level.set(open.current_rms());
-                meter.queue_draw();
-            }
-            gtk::glib::ControlFlow::Continue
-        }
-    });
-
-    let threshold = adw::SpinRow::builder()
-        .title("Silence threshold")
-        .subtitle("Below this counts as silence")
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().silence_threshold as f64,
-            0.001,
-            0.100,
-            0.001,
-            0.010,
-            0.0,
-        ))
-        .digits(3)
-        .build();
+    let threshold = spin_row(
+        prefs,
+        "Silence threshold",
+        "Below this counts as silence",
+        SpinRange {
+            lower: 0.001,
+            upper: 0.100,
+            step: 0.001,
+            page: 0.010,
+            digits: 3,
+        },
+        |c| c.silence_threshold as f64,
+        |c, value| c.silence_threshold = value as f32,
+    );
     threshold.connect_value_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
         let meter = meter.clone();
-        move |row| {
-            config.borrow_mut().silence_threshold = row.value() as f32;
-            save(&config, &on_change);
-            meter.queue_draw();
-        }
+        move |_| meter.queue_draw()
     });
 
-    // Added straight to the group: a plain box nested inside one does not
-    // render as a row.
     // The meter and its caption go inside a row of their own. Adding a bare
     // widget to a preferences group drops it below the boxed list rather than
     // in it, which is why the gauge appeared to be floating outside the frame.
@@ -401,22 +369,11 @@ fn scale(rms: f32) -> f64 {
     ((rms as f64) / 0.25).sqrt().clamp(0.0, 1.0)
 }
 
-fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
-    use std::f64::consts::{FRAC_PI_2, PI};
-    let r = r.min(w / 2.0).min(h / 2.0);
-    cr.new_sub_path();
-    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
-    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
-    cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
-    cr.arc(x + r, y + r, r, PI, 3.0 * FRAC_PI_2);
-    cr.close_path();
-}
-
 /// The microphone picker. "System default" comes first and is what most people
 /// want; the rest are the actual capture devices, not ALSA's plugin zoo.
-fn microphone_row(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::ComboRow {
+fn microphone_row(prefs: &Rc<Prefs>) -> adw::ComboRow {
     let devices = crate::audio::input_devices();
-    let chosen = config.borrow().input_device.clone();
+    let chosen = prefs.get(|c| c.input_device.clone());
 
     let mut ids: Vec<String> = vec![String::new()];
     let names = gtk::StringList::new(&["System default"]);
@@ -441,152 +398,180 @@ fn microphone_row(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Co
         .build();
 
     row.connect_selected_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
+        let prefs = Rc::clone(prefs);
         move |row| {
-            let Some(id) = ids.get(row.selected() as usize) else {
-                return;
-            };
-            config.borrow_mut().input_device = id.clone();
-            save(&config, &on_change);
+            if let Some(id) = ids.get(row.selected() as usize) {
+                prefs.update(|c| c.input_device = id.clone());
+            }
         }
     });
     row
 }
 
-fn output_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
+fn output_group(prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("When a transcript arrives")
         .build();
 
-    let copy = adw::SwitchRow::builder()
-        .title("Copy to the clipboard")
-        .active(config.borrow().copy_to_clipboard)
-        .build();
-    copy.connect_active_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().copy_to_clipboard = row.is_active();
-            save(&config, &on_change);
-        }
-    });
-    group.add(&copy);
+    group.add(&switch_row(
+        prefs,
+        "Copy to the clipboard",
+        None,
+        |c| c.copy_to_clipboard,
+        |c, on| c.copy_to_clipboard = on,
+    ));
 
     let can_type = crate::output::can_type();
-    let type_row = adw::SwitchRow::builder()
-        .title("Type into the focused window")
-        .subtitle(if can_type {
+    let type_row = switch_row(
+        prefs,
+        "Type into the focused window",
+        Some(if can_type {
             "Using wtype"
         } else {
             "Needs wtype installed"
-        })
-        .active(config.borrow().type_on_finish && can_type)
-        .sensitive(can_type)
-        .build();
-    type_row.connect_active_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().type_on_finish = row.is_active();
-            save(&config, &on_change);
-        }
-    });
+        }),
+        |c| c.type_on_finish && crate::output::can_type(),
+        |c, on| c.type_on_finish = on,
+    );
+    type_row.set_sensitive(can_type);
     group.add(&type_row);
 
     group
 }
 
-fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::PreferencesGroup {
+fn window_group(prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Recording").build();
 
-    let preview = adw::SwitchRow::builder()
-        .title("Live transcript")
-        .subtitle("Show words under the button while you talk, at the cost of re-transcribing twice a second")
-        .active(config.borrow().live_preview)
-        .build();
-    preview.connect_active_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().live_preview = row.is_active();
-            save(&config, &on_change);
-        }
-    });
-    group.add(&preview);
+    group.add(&switch_row(
+        prefs,
+        "Live transcript",
+        Some("Show words under the button while you talk, at the cost of re-transcribing twice a second"),
+        |c| c.live_preview,
+        |c, on| c.live_preview = on,
+    ));
 
-    group.add(&microphone_row(config, on_change));
-    add_microphone_test(&group, config, on_change);
+    group.add(&microphone_row(prefs));
+    add_microphone_test(&group, prefs);
 
-    let pause = adw::SwitchRow::builder()
-        .title("Pause media while recording")
-        .subtitle("Anything out of the speakers ends up in the transcript")
-        .active(config.borrow().pause_players)
-        .build();
-    pause.connect_active_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().pause_players = row.is_active();
-            save(&config, &on_change);
-        }
-    });
-    group.add(&pause);
+    group.add(&switch_row(
+        prefs,
+        "Pause media while recording",
+        Some("Anything out of the speakers ends up in the transcript"),
+        |c| c.pause_players,
+        |c, on| c.pause_players = on,
+    ));
 
-    let silence = adw::SpinRow::builder()
-        .title("Stop after silence")
-        .subtitle("Seconds of quiet that end a recording. 0 waits for you to stop it")
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().silence_timeout as f64,
-            0.0,
-            30.0,
-            0.5,
-            1.0,
-            0.0,
-        ))
-        .digits(1)
-        .build();
-    silence.connect_value_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().silence_timeout = row.value() as f32;
-            save(&config, &on_change);
-        }
-    });
-    group.add(&silence);
+    group.add(&spin_row(
+        prefs,
+        "Stop after silence",
+        "Seconds of quiet that end a recording. 0 waits for you to stop it",
+        SpinRange {
+            lower: 0.0,
+            upper: 30.0,
+            step: 0.5,
+            page: 1.0,
+            digits: 1,
+        },
+        |c| c.silence_timeout as f64,
+        |c, value| c.silence_timeout = value as f32,
+    ));
 
-    let history = adw::SpinRow::builder()
-        .title("Recordings to keep")
-        .subtitle("Older transcripts fall off the end of the list")
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().history_limit as f64,
-            1.0,
-            10_000.0,
-            10.0,
-            100.0,
-            0.0,
-        ))
-        .build();
-    history.connect_value_notify({
-        let config = Rc::clone(config);
-        let on_change = Rc::clone(on_change);
-        move |row| {
-            config.borrow_mut().history_limit = row.value() as usize;
-            save(&config, &on_change);
-        }
-    });
-    group.add(&history);
+    group.add(&spin_row(
+        prefs,
+        "Recordings to keep",
+        "Older transcripts fall off the end of the list",
+        SpinRange {
+            lower: 1.0,
+            upper: 10_000.0,
+            step: 10.0,
+            page: 100.0,
+            digits: 0,
+        },
+        |c| c.history_limit as f64,
+        |c, value| c.history_limit = value as usize,
+    ));
 
     group
 }
 
-/// Write the file and tell the window. A failed write is worth saying out loud
-/// but not worth losing the change the user just made in the running session.
-fn save(config: &Rc<RefCell<Config>>, on_change: &OnChange) {
-    let config = config.borrow();
-    if let Err(err) = config.save() {
-        eprintln!("yapper: could not save preferences: {err:#}");
+// --- one row per setting -----------------------------------------------------
+//
+// Each helper reads its initial value from the config and writes every change
+// straight back through `Prefs::update`, so a new setting is one call here
+// rather than a hand-written closure.
+
+fn switch_row(
+    prefs: &Rc<Prefs>,
+    title: &str,
+    subtitle: Option<&str>,
+    read: fn(&Config) -> bool,
+    write: fn(&mut Config, bool),
+) -> adw::SwitchRow {
+    let row = adw::SwitchRow::builder()
+        .title(title)
+        .active(prefs.get(read))
+        .build();
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
     }
-    on_change(&config);
+    row.connect_active_notify({
+        let prefs = Rc::clone(prefs);
+        move |row| prefs.update(|c| write(c, row.is_active()))
+    });
+    row
+}
+
+struct SpinRange {
+    lower: f64,
+    upper: f64,
+    step: f64,
+    page: f64,
+    digits: u32,
+}
+
+fn spin_row(
+    prefs: &Rc<Prefs>,
+    title: &str,
+    subtitle: &str,
+    range: SpinRange,
+    read: fn(&Config) -> f64,
+    write: fn(&mut Config, f64),
+) -> adw::SpinRow {
+    let row = adw::SpinRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .adjustment(&gtk::Adjustment::new(
+            prefs.get(read),
+            range.lower,
+            range.upper,
+            range.step,
+            range.page,
+            0.0,
+        ))
+        .digits(range.digits)
+        .build();
+    row.connect_value_notify({
+        let prefs = Rc::clone(prefs);
+        move |row| prefs.update(|c| write(c, row.value()))
+    });
+    row
+}
+
+fn entry_row(
+    prefs: &Rc<Prefs>,
+    title: &str,
+    tooltip: &str,
+    read: fn(&Config) -> String,
+    write: fn(&mut Config, &str),
+) -> adw::EntryRow {
+    let row = adw::EntryRow::builder()
+        .title(title)
+        .text(prefs.get(read))
+        .tooltip_text(tooltip)
+        .build();
+    row.connect_changed({
+        let prefs = Rc::clone(prefs);
+        move |row| prefs.update(|c| write(c, &row.text()))
+    });
+    row
 }
