@@ -104,6 +104,7 @@ type_on_finish = false
 history_limit = 200
 live_preview = true
 silence_timeout = 0.0
+silence_threshold = 0.004
 pause_players = true
 initial_prompt = ""
 ```
@@ -118,6 +119,13 @@ You'll find this under **Vocabulary** in preferences.
 you dictate, so sound from your speakers is less likely to end up in the
 transcript. It resumes them afterwards, but only if they were playing when you
 started. This is on by default.
+
+**Silence threshold (`silence_threshold`)** is the level above which yapper
+treats sound as speech rather than room noise. The number means nothing on its
+own, so preferences has a **Test the microphone** button: press it, talk, and
+watch the bar move against the line. Put the line just below where your voice
+sits. Raise it if a noisy room keeps recordings running; lower it if quiet
+speech gets dropped as silence.
 
 **Silence timeout (`silence_timeout`)** finishes a recording after the number of
 quiet seconds you choose. A ring around the button shows the countdown. It's

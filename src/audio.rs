@@ -11,22 +11,30 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 
 pub const TARGET_RATE: u32 = 16_000;
 
-/// Room tone sits well below this; even quiet speech sits above it.
-pub const SILENCE_RMS: f32 = 0.004;
+/// Where the threshold starts before anyone adjusts it.
+pub const DEFAULT_SILENCE_RMS: f32 = 0.004;
 
 /// Tracks how long the microphone has been quiet, so a recording can end
 /// itself. Silence before the first word does not count — otherwise a
 /// recording started a moment early would stop before you spoke.
-#[derive(Default)]
 struct SilenceTracker {
     /// Per-channel frames of quiet since the last sound.
     silent_frames: usize,
     heard_speech: bool,
+    threshold: f32,
 }
 
 impl SilenceTracker {
+    fn new(threshold: f32) -> Self {
+        Self {
+            silent_frames: 0,
+            heard_speech: false,
+            threshold,
+        }
+    }
+
     fn observe(&mut self, rms: f32, frames: usize) {
-        if rms >= SILENCE_RMS {
+        if rms >= self.threshold {
             self.silent_frames = 0;
             self.heard_speech = true;
         } else if self.heard_speech {
@@ -36,11 +44,13 @@ impl SilenceTracker {
 }
 
 /// Shared between the audio callback and the UI thread.
-#[derive(Default)]
 struct Capture {
     samples: Vec<f32>,
     /// Loudest sample since the UI last looked, for the level meter.
     peak: f32,
+    /// Loudness of the most recent buffer, which is what the threshold is
+    /// compared against and what the microphone test displays.
+    rms: f32,
     silence: SilenceTracker,
 }
 
@@ -57,7 +67,17 @@ impl Recorder {
     /// id from [`input_devices`]; an empty or unknown one falls back to the
     /// system default, since an unplugged microphone should not stop yapper
     /// from recording at all.
-    pub fn start(wanted: Option<&str>) -> Result<Self> {
+    pub fn start(wanted: Option<&str>, threshold: f32) -> Result<Self> {
+        Self::open(wanted, threshold, true)
+    }
+
+    /// Levels only, for the microphone test: audio is measured and thrown away
+    /// rather than accumulated.
+    pub fn monitor(wanted: Option<&str>, threshold: f32) -> Result<Self> {
+        Self::open(wanted, threshold, false)
+    }
+
+    fn open(wanted: Option<&str>, threshold: f32, retain: bool) -> Result<Self> {
         let host = cpal::default_host();
         let device = wanted
             .filter(|id| !id.is_empty())
@@ -80,16 +100,21 @@ impl Recorder {
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
 
-        let capture = Arc::new(Mutex::new(Capture::default()));
+        let capture = Arc::new(Mutex::new(Capture {
+            samples: Vec::new(),
+            peak: 0.0,
+            rms: 0.0,
+            silence: SilenceTracker::new(threshold),
+        }));
         let err_fn = |err| eprintln!("yapper: audio stream error: {err}");
 
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, &capture, err_fn),
-            SampleFormat::I16 => build_stream::<i16>(&device, &config, &capture, err_fn),
-            SampleFormat::I32 => build_stream::<i32>(&device, &config, &capture, err_fn),
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, &capture, err_fn),
-            SampleFormat::I8 => build_stream::<i8>(&device, &config, &capture, err_fn),
-            SampleFormat::U8 => build_stream::<u8>(&device, &config, &capture, err_fn),
+            SampleFormat::F32 => build_stream::<f32>(&device, &config, &capture, retain, err_fn),
+            SampleFormat::I16 => build_stream::<i16>(&device, &config, &capture, retain, err_fn),
+            SampleFormat::I32 => build_stream::<i32>(&device, &config, &capture, retain, err_fn),
+            SampleFormat::U16 => build_stream::<u16>(&device, &config, &capture, retain, err_fn),
+            SampleFormat::I8 => build_stream::<i8>(&device, &config, &capture, retain, err_fn),
+            SampleFormat::U8 => build_stream::<u8>(&device, &config, &capture, retain, err_fn),
             other => Err(anyhow!("unsupported sample format {other:?}")),
         }?;
 
@@ -108,6 +133,11 @@ impl Recorder {
     pub fn silence_secs(&self) -> f32 {
         let capture = self.capture.lock().unwrap();
         capture.silence.silent_frames as f32 / self.sample_rate as f32
+    }
+
+    /// Loudness of the most recent buffer, for the microphone test.
+    pub fn current_rms(&self) -> f32 {
+        self.capture.lock().unwrap().rms
     }
 
     /// Loudest sample since the last call, as a 0.0..=1.0 level. Resets the peak.
@@ -151,6 +181,7 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     capture: &Arc<Mutex<Capture>>,
+    retain: bool,
     err_fn: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<cpal::Stream>
 where
@@ -168,7 +199,9 @@ where
                 let mut sum_squares = 0.0f64;
                 for &sample in data {
                     let value = f32::from_sample(sample);
-                    capture.samples.push(value);
+                    if retain {
+                        capture.samples.push(value);
+                    }
                     sum_squares += (value as f64) * (value as f64);
                     let magnitude = value.abs();
                     if magnitude > capture.peak {
@@ -179,6 +212,7 @@ where
                 // which is the right window for "is anyone talking".
                 if !data.is_empty() {
                     let rms = (sum_squares / data.len() as f64).sqrt() as f32;
+                    capture.rms = rms;
                     capture.silence.observe(rms, data.len() / channels);
                 }
             },
@@ -354,7 +388,7 @@ mod tests {
 
     #[test]
     fn silence_is_not_counted_until_something_has_been_said() {
-        let mut tracker = SilenceTracker::default();
+        let mut tracker = SilenceTracker::new(DEFAULT_SILENCE_RMS);
         // A recording started a moment early must not end itself before the
         // speaker begins.
         tracker.observe(0.0, 16_000);
@@ -369,7 +403,7 @@ mod tests {
 
     #[test]
     fn a_word_resets_the_silence() {
-        let mut tracker = SilenceTracker::default();
+        let mut tracker = SilenceTracker::new(DEFAULT_SILENCE_RMS);
         tracker.observe(0.3, 1_600);
         tracker.observe(0.0, 16_000);
         assert_eq!(tracker.silent_frames, 16_000);
@@ -380,11 +414,11 @@ mod tests {
 
     #[test]
     fn the_threshold_sits_between_room_tone_and_speech() {
-        let mut tracker = SilenceTracker::default();
+        let mut tracker = SilenceTracker::new(DEFAULT_SILENCE_RMS);
         tracker.observe(0.3, 100);
-        tracker.observe(SILENCE_RMS - 0.001, 100);
+        tracker.observe(DEFAULT_SILENCE_RMS - 0.001, 100);
         assert_eq!(tracker.silent_frames, 100, "room tone counts as silence");
-        tracker.observe(SILENCE_RMS + 0.001, 100);
+        tracker.observe(DEFAULT_SILENCE_RMS + 0.001, 100);
         assert_eq!(tracker.silent_frames, 0, "quiet speech does not");
     }
 
@@ -433,12 +467,30 @@ mod tests {
         assert_eq!(resample(&input, TARGET_RATE, TARGET_RATE), input);
     }
 
+    /// Levels only, as the microphone test reads them:
+    ///   cargo test --release -- --ignored --nocapture monitor_reports
+    #[test]
+    #[ignore]
+    fn monitor_reports_levels_without_keeping_audio() {
+        let recorder = Recorder::monitor(None, DEFAULT_SILENCE_RMS).expect("opening the device");
+        let mut highest = 0.0f32;
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            highest = highest.max(recorder.current_rms());
+        }
+        let kept = recorder.finish();
+        println!("  peak RMS seen: {highest:.4}");
+        println!("  threshold:     {DEFAULT_SILENCE_RMS:.4}");
+        println!("  above it:      {}", highest >= DEFAULT_SILENCE_RMS);
+        assert!(kept.is_empty(), "monitoring must not accumulate audio");
+    }
+
     /// Needs a real microphone, so it only runs on request:
     /// `cargo test -- --ignored live_capture`
     #[test]
     #[ignore]
     fn live_capture_produces_16k_mono_audio() {
-        let recorder = Recorder::start(None).expect("opening the default input device");
+        let recorder = Recorder::start(None, DEFAULT_SILENCE_RMS).expect("opening the default input device");
         std::thread::sleep(std::time::Duration::from_millis(500));
         let samples = recorder.finish();
         assert!(
@@ -470,7 +522,7 @@ mod device_tests {
     #[ignore]
     fn opens_the_chosen_device() {
         let wanted = std::env::var("YAPPER_TEST_DEVICE").ok();
-        let recorder = Recorder::start(wanted.as_deref()).expect("opening the device");
+        let recorder = Recorder::start(wanted.as_deref(), DEFAULT_SILENCE_RMS).expect("opening the device");
         std::thread::sleep(std::time::Duration::from_millis(400));
         let samples = recorder.finish();
         println!("  captured {} samples at 16 kHz mono", samples.len());

@@ -37,6 +37,7 @@ pub enum Event {
 /// preferences take effect on the next transcription rather than on restart.
 #[derive(Clone)]
 pub struct Settings {
+    pub silence_threshold: f32,
     pub language: Option<String>,
     pub threads: i32,
     pub translate: bool,
@@ -46,6 +47,7 @@ pub struct Settings {
 impl Settings {
     pub fn from_config(config: &Config) -> Self {
         Self {
+            silence_threshold: config.silence_threshold,
             language: config.language_code().map(str::to_owned),
             threads: config.thread_count(),
             translate: config.translate,
@@ -118,20 +120,12 @@ pub fn spawn(config: &Config) -> Worker {
                         if worker_interrupt.load(Ordering::Relaxed) {
                             continue;
                         }
-                        let Settings {
-                            language,
-                            threads,
-                            translate,
-                            prompt,
-                        } = worker_settings.lock().unwrap().clone();
+                        let settings = worker_settings.lock().unwrap().clone();
                         let abort = Arc::clone(&worker_interrupt);
                         let text = run(
                             &context,
                             &samples,
-                            language.as_deref(),
-                            threads,
-                            translate,
-                            prompt.as_deref(),
+                            &settings,
                             Some(Box::new(move || abort.load(Ordering::Relaxed))),
                         )
                         .unwrap_or_default();
@@ -143,22 +137,9 @@ pub fn spawn(config: &Config) -> Worker {
                     }
                     Request::Transcribe(samples) => {
                         worker_interrupt.store(false, Ordering::Relaxed);
-                        let Settings {
-                            language,
-                            threads,
-                            translate,
-                            prompt,
-                        } = worker_settings.lock().unwrap().clone();
+                        let settings = worker_settings.lock().unwrap().clone();
                         let _ = event_tx.send_blocking(Event::Transcribing);
-                        let event = match run(
-                            &context,
-                            &samples,
-                            language.as_deref(),
-                            threads,
-                            translate,
-                            prompt.as_deref(),
-                            None,
-                        ) {
+                        let event = match run(&context, &samples, &settings, None) {
                             Ok(text) => Event::Done(text),
                             Err(err) => Event::Failed(format!("{err:#}")),
                         };
@@ -196,16 +177,24 @@ fn load_model(path: &Path) -> Result<WhisperContext> {
 pub(crate) fn run(
     context: &WhisperContext,
     samples: &[f32],
-    language: Option<&str>,
-    threads: i32,
-    translate: bool,
-    prompt: Option<&str>,
+    settings: &Settings,
     // Present for previews, which are allowed to give up part way.
     abort: Option<Box<dyn FnMut() -> bool + 'static>>,
 ) -> Result<String> {
+    let Settings {
+        silence_threshold: threshold,
+        language,
+        threads,
+        translate,
+        prompt,
+    } = settings;
+    let (threshold, threads, translate) = (*threshold, *threads, *translate);
+    let language = language.as_deref();
+    let prompt = prompt.as_deref();
+
     // Whisper invents speech when handed silence or a fragment, so screen both
     // out before they reach the model.
-    if samples.len() < crate::audio::TARGET_RATE as usize / 2 || is_silent(samples) {
+    if samples.len() < crate::audio::TARGET_RATE as usize / 2 || is_silent(samples, threshold) {
         return Ok(String::new());
     }
 
@@ -247,10 +236,10 @@ pub(crate) fn run(
     Ok(text.trim().to_string())
 }
 
-fn is_silent(samples: &[f32]) -> bool {
+fn is_silent(samples: &[f32], threshold: f32) -> bool {
     let sum_squares: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
     let rms = (sum_squares / samples.len() as f64).sqrt() as f32;
-    rms < crate::audio::SILENCE_RMS
+    rms < threshold
 }
 
 /// Whisper narrates non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and
@@ -287,10 +276,13 @@ mod tests {
 
     #[test]
     fn silence_is_detected_but_speech_is_not() {
-        assert!(is_silent(&vec![0.0; 16_000]));
-        assert!(is_silent(&[0.001, -0.002, 0.0015]));
+        let t = crate::audio::DEFAULT_SILENCE_RMS;
+        assert!(is_silent(&vec![0.0; 16_000], t));
+        assert!(is_silent(&[0.001, -0.002, 0.0015], t));
         let speech: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin() * 0.2).collect();
-        assert!(!is_silent(&speech));
+        assert!(!is_silent(&speech, t));
+        // A higher threshold reclassifies the same audio.
+        assert!(is_silent(&speech, 0.5));
     }
 
     /// Proves the vocabulary reaches the decoder. Steering it towards nonsense
@@ -305,15 +297,15 @@ mod tests {
         let config = Config::load().expect("loading config");
         let context = load_model(&config.model_path).expect("loading the model");
 
-        let plain = run(&context, &samples, Some("en"), config.thread_count(), false, None, None)
+        let plain = run(&context, &samples, &Settings::from_config(&config), None)
             .expect("transcribing");
         let prompted = run(
             &context,
             &samples,
-            Some("en"),
-            config.thread_count(),
-            false,
-            Some("Hyprland, libadwaita, PipeWire, Vicinae, yapper"),
+            &Settings {
+                prompt: Some("Siobhan, Niamh, Loughborough, Sainsbury's".into()),
+                ..Settings::from_config(&config)
+            },
             None,
         )
         .expect("transcribing");
@@ -330,8 +322,8 @@ mod tests {
         let samples = read_pcm16_wav(&path);
         let config = Config::load().expect("loading config");
         let context = load_model(&config.model_path).expect("loading the model");
-        let text = run(&context, &samples, Some("en"), config.thread_count(), false, None, None)
-            .expect("transcribing");
+        let settings = Settings::from_config(&config);
+        let text = run(&context, &samples, &settings, None).expect("transcribing");
         println!("transcript: {text}");
         assert!(!text.is_empty());
     }

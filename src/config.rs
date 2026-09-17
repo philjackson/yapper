@@ -28,6 +28,9 @@ pub struct Config {
     /// Stop recording after this many seconds of silence. 0 waits for you to
     /// stop it yourself.
     pub silence_timeout: f32,
+    /// How loud counts as speech, as an RMS level. Room tone sits below it,
+    /// speech above. Preferences can show you where yours falls.
+    pub silence_threshold: f32,
     /// Pause anything that is playing while you dictate, and start it again
     /// afterwards. Speakers bleed into the microphone.
     pub pause_players: bool,
@@ -51,6 +54,7 @@ impl Default for Config {
             history_limit: 200,
             live_preview: true,
             silence_timeout: 0.0,
+            silence_threshold: crate::audio::DEFAULT_SILENCE_RMS,
             pause_players: true,
             input_device: String::new(),
             initial_prompt: String::new(),

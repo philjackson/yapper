@@ -4,7 +4,7 @@
 //! saves having an OK button that can be forgotten. Everything takes effect on
 //! the next transcription except the model, which is loaded once at startup.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -223,6 +223,163 @@ fn vocabulary_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::
     group
 }
 
+/// A live level meter with the silence threshold drawn across it.
+///
+/// A threshold is impossible to set as a bare number — 0.004 means nothing
+/// until you can see where your own voice falls against it. Speak, watch the
+/// bar, and put the line under it.
+fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config>>, on_change: &OnChange) {
+    let level = Rc::new(Cell::new(0.0f32));
+    let recorder: Rc<RefCell<Option<crate::audio::Recorder>>> = Rc::new(RefCell::new(None));
+
+    let meter = gtk::DrawingArea::builder()
+        .content_height(34)
+        .hexpand(true)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+
+    meter.set_draw_func({
+        let config = Rc::clone(config);
+        let level = Rc::clone(&level);
+        move |_, cr, width, height| {
+            let (width, height) = (width as f64, height as f64);
+            let threshold = config.borrow().silence_threshold;
+            let loud = level.get() >= threshold;
+
+            // Track.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+            rounded(cr, 0.0, 0.0, width, height, height / 2.0);
+            let _ = cr.fill();
+
+            // Level. Square-rooted, because speech and room tone are orders of
+            // magnitude apart and a linear bar would pin one end or the other.
+            let filled = scale(level.get()) * width;
+            if filled > 1.0 {
+                if loud {
+                    cr.set_source_rgba(0.18, 0.76, 0.49, 0.95);
+                } else {
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.28);
+                }
+                rounded(cr, 0.0, 0.0, filled, height, height / 2.0);
+                let _ = cr.fill();
+            }
+
+            // The threshold itself.
+            let mark = scale(threshold) * width;
+            cr.set_source_rgba(0.93, 0.28, 0.31, 0.95);
+            cr.set_line_width(2.0);
+            cr.move_to(mark, 0.0);
+            cr.line_to(mark, height);
+            let _ = cr.stroke();
+        }
+    });
+
+    let test = gtk::ToggleButton::builder()
+        .label("Test")
+        .valign(gtk::Align::Center)
+        .build();
+
+    let row = adw::ActionRow::builder()
+        .title("Test the microphone")
+        .subtitle("Speak, and put the line just under where your voice sits")
+        .build();
+    row.add_suffix(&test);
+    row.set_activatable_widget(Some(&test));
+
+    test.connect_toggled({
+        let config = Rc::clone(config);
+        let recorder = Rc::clone(&recorder);
+        let level = Rc::clone(&level);
+        let meter = meter.clone();
+        move |button| {
+            if !button.is_active() {
+                recorder.borrow_mut().take();
+                level.set(0.0);
+                meter.queue_draw();
+                return;
+            }
+
+            let (device, threshold) = {
+                let config = config.borrow();
+                (config.input_device.clone(), config.silence_threshold)
+            };
+            match crate::audio::Recorder::monitor(Some(&device), threshold) {
+                Ok(open) => *recorder.borrow_mut() = Some(open),
+                Err(err) => {
+                    eprintln!("yapper: cannot open the microphone: {err:#}");
+                    button.set_active(false);
+                }
+            }
+        }
+    });
+
+    // Only runs while something is being monitored.
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), {
+        let recorder = Rc::clone(&recorder);
+        let level = Rc::clone(&level);
+        let meter = meter.downgrade();
+        move || {
+            let Some(meter) = meter.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            if let Some(open) = recorder.borrow().as_ref() {
+                level.set(open.current_rms());
+                meter.queue_draw();
+            }
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+
+    let threshold = adw::SpinRow::builder()
+        .title("Silence threshold")
+        .subtitle("Below this counts as silence. Lower hears more, and more noise")
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().silence_threshold as f64,
+            0.001,
+            0.100,
+            0.001,
+            0.010,
+            0.0,
+        ))
+        .digits(3)
+        .build();
+    threshold.connect_value_notify({
+        let config = Rc::clone(config);
+        let on_change = Rc::clone(on_change);
+        let meter = meter.clone();
+        move |row| {
+            config.borrow_mut().silence_threshold = row.value() as f32;
+            save(&config, &on_change);
+            meter.queue_draw();
+        }
+    });
+
+    // Added straight to the group: a plain box nested inside one does not
+    // render as a row.
+    group.add(&row);
+    group.add(&meter);
+    group.add(&threshold);
+}
+
+/// Compresses the range so room tone and speech are both visible.
+fn scale(rms: f32) -> f64 {
+    ((rms as f64) / 0.25).sqrt().clamp(0.0, 1.0)
+}
+
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let r = r.min(w / 2.0).min(h / 2.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
+    cr.arc(x + r, y + r, r, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
+}
+
 /// The microphone picker. "System default" comes first and is what most people
 /// want; the rest are the actual capture devices, not ALSA's plugin zoo.
 fn microphone_row(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::ComboRow {
@@ -327,6 +484,7 @@ fn window_group(config: &Rc<RefCell<Config>>, on_change: &OnChange) -> adw::Pref
     group.add(&preview);
 
     group.add(&microphone_row(config, on_change));
+    add_microphone_test(&group, config, on_change);
 
     let pause = adw::SwitchRow::builder()
         .title("Pause media while recording")
