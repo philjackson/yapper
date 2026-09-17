@@ -284,6 +284,18 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
         }
     });
 
+    // The meter is meaningless without saying which mark is which.
+    let caption = gtk::Label::builder()
+        .label("The bar is what the microphone hears. The red line is the threshold — it turns green above it, which is what counts as speech.")
+        .css_classes(["caption", "dim-label"])
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .justify(gtk::Justification::Center)
+        .margin_bottom(14)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+
     let test = gtk::ToggleButton::builder()
         .label("Test")
         .valign(gtk::Align::Center)
@@ -342,7 +354,7 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
 
     let threshold = adw::SpinRow::builder()
         .title("Silence threshold")
-        .subtitle("Below this counts as silence. Lower hears more, and more noise")
+        .subtitle("Below this counts as silence")
         .adjustment(&gtk::Adjustment::new(
             config.borrow().silence_threshold as f64,
             0.001,
@@ -366,8 +378,21 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
 
     // Added straight to the group: a plain box nested inside one does not
     // render as a row.
+    // The meter and its caption go inside a row of their own. Adding a bare
+    // widget to a preferences group drops it below the boxed list rather than
+    // in it, which is why the gauge appeared to be floating outside the frame.
+    let gauge = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    gauge.append(&meter);
+    gauge.append(&caption);
+
+    let gauge_row = adw::PreferencesRow::builder()
+        .activatable(false)
+        .selectable(false)
+        .child(&gauge)
+        .build();
+
     group.add(&row);
-    group.add(&meter);
+    group.add(&gauge_row);
     group.add(&threshold);
 }
 
