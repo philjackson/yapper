@@ -45,7 +45,12 @@ For example, in Hyprland:
 
 ```ini
 bind = SUPER, D, exec, yapper --quick
+bind = SUPER, SHIFT, D, exec, yapper --quick --type
 ```
+
+`--type` types the transcript straight into whatever window has focus, as well
+as copying it, so you can keep one key for each. It needs
+[wtype](https://github.com/atx/wtype).
 
 <p align="center">
   <img src="docs/quick.png" alt="The quick capture panel" width="420">
