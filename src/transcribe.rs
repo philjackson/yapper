@@ -236,10 +236,27 @@ pub(crate) fn run(
     Ok(text.trim().to_string())
 }
 
+/// True when no short stretch of the clip rises above the threshold.
+///
+/// Measured per block rather than across the whole recording, because the two
+/// give wildly different numbers for the same audio: a sentence surrounded by
+/// pauses averages out low, so a whole-clip average would throw away short or
+/// quiet utterances as the threshold rises. The live detector works in blocks,
+/// and one setting should mean one thing in both places.
 fn is_silent(samples: &[f32], threshold: f32) -> bool {
+    !samples.chunks(SILENCE_BLOCK).any(|block| rms(block) >= threshold)
+}
+
+/// 30ms at 16 kHz: long enough to be a stable measure, short enough that one
+/// word registers.
+const SILENCE_BLOCK: usize = 480;
+
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
     let sum_squares: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
-    let rms = (sum_squares / samples.len() as f64).sqrt() as f32;
-    rms < threshold
+    (sum_squares / samples.len() as f64).sqrt() as f32
 }
 
 /// Whisper narrates non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and
@@ -281,8 +298,29 @@ mod tests {
         assert!(is_silent(&[0.001, -0.002, 0.0015], t));
         let speech: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.05).sin() * 0.2).collect();
         assert!(!is_silent(&speech, t));
-        // A higher threshold reclassifies the same audio.
+        // A threshold above the speech itself reclassifies it.
         assert!(is_silent(&speech, 0.5));
+    }
+
+    #[test]
+    fn a_short_utterance_is_not_drowned_by_the_pauses_around_it() {
+        // Half a second of speech in six seconds of room tone. Averaged over
+        // the whole clip this reads as silence; measured in blocks it does not.
+        let quiet = vec![0.0002f32; 16_000 * 3];
+        let speech: Vec<f32> = (0..8_000).map(|i| (i as f32 * 0.05).sin() * 0.02).collect();
+        let clip: Vec<f32> = quiet
+            .iter()
+            .chain(speech.iter())
+            .chain(quiet.iter())
+            .copied()
+            .collect();
+
+        let whole_clip = rms(&clip);
+        assert!(whole_clip < 0.008, "whole-clip average is {whole_clip}");
+        assert!(
+            !is_silent(&clip, 0.008),
+            "the utterance must survive a threshold its clip average falls under"
+        );
     }
 
     /// Proves the vocabulary reaches the decoder. Steering it towards nonsense

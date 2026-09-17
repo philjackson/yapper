@@ -23,7 +23,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
 
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
-        .content_width(520)
+        .content_width(640)
         .build();
     let page = adw::PreferencesPage::new();
 
@@ -233,12 +233,12 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
     let recorder: Rc<RefCell<Option<crate::audio::Recorder>>> = Rc::new(RefCell::new(None));
 
     let meter = gtk::DrawingArea::builder()
-        .content_height(34)
+        .content_height(22)
         .hexpand(true)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(12)
-        .margin_end(12)
+        .margin_top(14)
+        .margin_bottom(14)
+        .margin_start(16)
+        .margin_end(16)
         .build();
 
     meter.set_draw_func({
@@ -246,34 +246,41 @@ fn add_microphone_test(group: &adw::PreferencesGroup, config: &Rc<RefCell<Config
         let level = Rc::clone(&level);
         move |_, cr, width, height| {
             let (width, height) = (width as f64, height as f64);
+            let radius = height / 2.0;
             let threshold = config.borrow().silence_threshold;
-            let loud = level.get() >= threshold;
 
             // Track.
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
-            rounded(cr, 0.0, 0.0, width, height, height / 2.0);
+            rounded(cr, 0.0, 0.0, width, height, radius);
             let _ = cr.fill();
 
-            // Level. Square-rooted, because speech and room tone are orders of
+            // Everything else is clipped to the track, so neither the level nor
+            // the threshold mark can spill past its rounded ends.
+            let _ = cr.save();
+            rounded(cr, 0.0, 0.0, width, height, radius);
+            cr.clip();
+
+            // Square-rooted, because speech and room tone are orders of
             // magnitude apart and a linear bar would pin one end or the other.
             let filled = scale(level.get()) * width;
-            if filled > 1.0 {
-                if loud {
+            if filled > 0.5 {
+                if level.get() >= threshold {
                     cr.set_source_rgba(0.18, 0.76, 0.49, 0.95);
                 } else {
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.28);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.30);
                 }
-                rounded(cr, 0.0, 0.0, filled, height, height / 2.0);
+                cr.rectangle(0.0, 0.0, filled, height);
                 let _ = cr.fill();
             }
 
-            // The threshold itself.
             let mark = scale(threshold) * width;
             cr.set_source_rgba(0.93, 0.28, 0.31, 0.95);
             cr.set_line_width(2.0);
             cr.move_to(mark, 0.0);
             cr.line_to(mark, height);
             let _ = cr.stroke();
+
+            let _ = cr.restore();
         }
     });
 
