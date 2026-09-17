@@ -7,6 +7,6 @@ Exec=yapper
 Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;Accessibility;
-Keywords=speech;dictation;transcribe;transcription;voice;whisper;microphone;
+Keywords=speech;dictation;transcribe;transcription;voice;microphone;
 StartupNotify=true
 StartupWMClass=dev.yapper.Yapper

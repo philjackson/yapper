@@ -2,8 +2,9 @@
 
 Yapper is a small dictation app for Wayland. Press a key, say what you want to
 write, and paste the transcript wherever you need it. It records through
-PipeWire and uses whisper.cpp to transcribe on your machine. You don't need an
-API key, and your audio stays local.
+PipeWire and transcribes on your machine — with NVIDIA's Canary or Parakeet,
+Moonshine or SenseVoice, whichever you pick from the model list. You don't need
+an API key, and your audio stays local.
 
 Inspired by [waystt](https://github.com/sevos/waystt), but with a modal window.
 
@@ -22,21 +23,62 @@ appears below the button.
 
 ## Install
 
-To build from source, you'll need Rust, GTK4, libadwaita, gtk4-layer-shell, cmake,
-clang and wl-clipboard. The first build also compiles whisper.cpp.
+To build from source, you'll need Rust, GTK4, libadwaita, gtk4-layer-shell, curl
+and wl-clipboard. The first build fetches a prebuilt sherpa-onnx, so it needs the
+network; the binary it produces does not.
 
 ```sh
 cargo build --release
-./scripts/fetch-model.sh base.en    # 148 MB
 install -Dm755 target/release/yapper ~/.local/bin/yapper
 install -Dm644 data/dev.yapper.Yapper.desktop \
     ~/.local/share/applications/dev.yapper.Yapper.desktop
 ```
 
-Vulkan support is enabled by default and can make transcription roughly 5×
-faster. If you don't have the Vulkan SDK, use `cargo build --release
---no-default-features` for a CPU-only build. For NVIDIA CUDA, use
-`cargo build --release --no-default-features -F cuda`.
+sherpa-onnx is linked statically, so that binary is the whole program: no
+libraries to place, and nothing to install but a model.
+
+There's no model to fetch by hand either — the first run offers the list below
+and downloads whichever you choose. curl does the downloading, so it has to be
+installed.
+
+## Models
+
+Yapper ships with no model and a list of them instead. Open it from the header
+bar menu (**Models…**), from **Model → Choose…** in preferences, or from the
+banner the window shows when there is nothing to transcribe with. Each row says
+what a model costs and what it speaks; one click downloads it, and the next
+loads it — no restart, no file chooser.
+
+A model's language lives on its row, too, because which languages mean anything
+is the model's own business. Canary is asked two questions — what it **hears**
+and what it **writes**, which is how it translates — SenseVoice is offered its
+six or "detect automatically", and Parakeet and Moonshine are asked nothing,
+since one detects for itself and the other only knows English.
+
+<p align="center">
+  <img src="docs/models.png" alt="The model list" width="520">
+</p>
+
+| Model | Download | Languages | |
+| --- | --- | --- | --- |
+| **Canary 180M flash** (NVIDIA) | 207 MB | English, German, Spanish, French | The default. Punctuates and capitalises, and translates between its four |
+| **Parakeet TDT 0.6B v3** (NVIDIA) | 670 MB | 25 European | The most accurate, and it works out which language you're speaking |
+| **Moonshine base** | 287 MB | English | Built for short dictation |
+| **Moonshine tiny** | 124 MB | English | The fastest and smallest here |
+| **SenseVoice small** | 240 MB | Chinese, English, Japanese, Korean, Cantonese | Writes numbers as digits |
+
+They all run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) on the
+CPU, and they are quick there: on a desktop CPU, eleven seconds of speech comes
+back as a punctuated sentence in 120 ms from Canary, 79 ms from Parakeet and
+36 ms from SenseVoice. None of them needs a GPU, and none of them can use one.
+
+Models land in `~/.local/share/yapper/models/`, one directory each, and the list
+will delete one for you when you want the disk back.
+
+They transcribe a finished recording rather than decoding as you speak, so the
+live transcript works by re-running the model on what it has so far, twice a
+second. sherpa-onnx does have genuinely streaming models; none is wired up here
+yet.
 
 ## Quick capture
 
@@ -104,9 +146,7 @@ Open preferences from the header bar menu or press `Ctrl+,`.
 You can also edit the settings in `~/.config/yapper/config.toml`:
 
 ```toml
-model_path = "/home/you/.local/share/yapper/models/ggml-base.en.bin"
-language = "auto"           # or an ISO code like "en", "de"
-translate = false           # translate speech into English
+model = "canary-180m-flash" # a name from the model list
 threads = 0                 # 0 chooses based on your CPU count
 input_device = ""           # empty uses the system default
 copy_to_clipboard = true
@@ -116,14 +156,21 @@ live_preview = true
 silence_timeout = 0.0
 silence_threshold = 0.004
 pause_players = true
-initial_prompt = ""
+
+[languages]                      # what each model was told, by model
+canary-180m-flash = "de>en"      # hears German, writes English
+sense-voice = "auto"             # left to detect
 ```
 
-**Vocabulary (`initial_prompt`)** helps with names and terms that Whisper gets
-wrong. Add a line or two of words you'd like it to recognise, such as colleagues'
-names or places you mention often. Whisper uses these as context when
-transcribing. Keep it short, as a long list can crowd out the audio context.
-You'll find this under **Vocabulary** in preferences.
+**Model (`model`)** names a model from the list above. Choosing one in the
+picker downloads it if it isn't here and loads it straight away.
+
+**Languages (`[languages]`)** keeps one entry per model: a language code, or
+`hears>writes` when a model is writing a different language than it hears.
+It's per model on purpose — `de` is exactly right for Canary and not a language
+SenseVoice will accept at all — and a code a model can't use is quietly
+replaced by one it can rather than stopping it from loading. Set it in the
+model list; there's no need to edit this by hand.
 
 **Pause players (`pause_players`)** pauses media players that support MPRIS while
 you dictate, so sound from your speakers is less likely to end up in the
@@ -143,14 +190,13 @@ off by default, since you might just be pausing to think. Try two or three
 seconds if you'd like recordings to finish automatically.
 
 **Live preview (`live_preview`)** updates the transcript twice a second while
-you talk. Earlier words may change as Whisper gets more context. When you
+you talk. Earlier words may change as the model gets more context. When you
 finish, yapper transcribes the full recording again and copies that final
 version to the clipboard.
 
-Larger models generally give more accurate results but take longer to run.
-Their approximate download sizes are: tiny 75 MB, base 148 MB, small 488 MB,
-medium 1.5 GB and large 3.1 GB. Preferences includes a link to download more
-models.
+**Translation** is Canary only, and it is the same control as its language: set
+**writes** to something other than **hears** and it translates between them —
+English, German, Spanish or French in any direction.
 
 To type a transcript directly into the focused window, you'll need
 [wtype](https://github.com/atx/wtype). The typing button is disabled if it isn't
@@ -181,6 +227,8 @@ what it will do before anything is pushed.
 
 ## Todo
 
+- A streaming model, so the live transcript decodes as you speak instead of
+  re-running on the whole clip
 - Search transcript history in the app
 - Adjust the silence threshold automatically
 - Add an option to keep audio alongside the text

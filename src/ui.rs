@@ -16,6 +16,7 @@ use crate::audio::Recorder;
 use crate::cli::Options;
 use crate::config::Config;
 use crate::history::{Entry, History, mm_ss, relative_time, relative_time_at};
+use crate::picker;
 use crate::preferences;
 use crate::output;
 use crate::players;
@@ -30,7 +31,7 @@ const RESTAMP: Duration = Duration::from_secs(30);
 /// How often the running transcript is refreshed while recording. One preview
 /// is in flight at a time, so a slow pass just means fewer updates.
 const PREVIEW_EVERY: Duration = Duration::from_millis(500);
-/// Whisper invents words from a fragment, so wait for something to work with.
+/// A model invents words from a fragment, so wait for something to work with.
 const PREVIEW_MIN_SECS: f32 = 1.0;
 /// Roughly three lines. The tail is what you want to read, not the beginning.
 const PREVIEW_CHARS: usize = 150;
@@ -90,7 +91,11 @@ struct App {
     /// Whether a tick callback is currently installed. The animation stops
     /// itself once the bars settle, so an idle window costs nothing.
     animating: Cell<bool>,
-    worker: Worker,
+    /// Replaced when a different model is picked, which is what loads it.
+    worker: RefCell<Worker>,
+    /// Bumped on every worker restart, so events from the model that was just
+    /// replaced can be recognised and dropped.
+    generation: Cell<u64>,
     /// One preview at a time: sending more only queues work behind the one
     /// that is already too old.
     preview_pending: Cell<bool>,
@@ -250,13 +255,9 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     // A banner rather than the empty-state page, because the page is hidden as
     // soon as there is any history, and quick capture has no page at all.
     let banner = adw::Banner::builder()
-        .button_label("Get a model")
+        .button_label("Choose a model")
         .revealed(false)
         .build();
-    banner.connect_button_clicked({
-        let window = window.clone();
-        move |_| preferences::open_models_page(Some(window.upcast_ref()))
-    });
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -297,6 +298,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
             .build();
 
         let menu = gtk::gio::Menu::new();
+        menu.append(Some("Models\u{2026}"), Some("win.models"));
         menu.append(Some("Preferences"), Some("win.preferences"));
         header.pack_end(
             &gtk::MenuButton::builder()
@@ -329,7 +331,8 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         first_frame: Cell::new(0),
         animating: Cell::new(false),
         preview_pending: Cell::new(false),
-        worker,
+        worker: RefCell::new(worker),
+        generation: Cell::new(0),
         window: window.clone(),
         toasts,
         stage: stage.clone(),
@@ -423,13 +426,13 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
     });
 
     // Worker events arrive here without blocking the main loop.
-    glib::spawn_future_local({
+    app_state.listen(events);
+
+    // The banner is the way out of having no model at all, so it opens the
+    // picker rather than a web page.
+    app_state.banner.connect_button_clicked({
         let app_state = Rc::clone(&app_state);
-        async move {
-            while let Ok(event) = events.recv().await {
-                app_state.handle_event(event);
-            }
-        }
+        move |_| app_state.show_models()
     });
 
     RUNNING.with(|running| *running.borrow_mut() = Some(Rc::clone(&app_state)));
@@ -462,6 +465,13 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         });
         window.add_action(&preferences);
         app.set_accels_for_action("win.preferences", &["<Control>comma"]);
+
+        let models = gtk::gio::SimpleAction::new("models", None);
+        models.connect_activate({
+            let app_state = Rc::clone(&app_state);
+            move |_, _| app_state.show_models()
+        });
+        window.add_action(&models);
     }
 
     install_shortcuts(&window, &app_state);
@@ -549,7 +559,7 @@ impl App {
         // Any preview still running is now pointless; the worker drops it.
         self.preview_pending.set(false);
         self.set_state(State::Working);
-        if self.worker.transcribe(samples).is_err() {
+        if self.worker.borrow().transcribe(samples).is_err() {
             self.set_state(State::Broken("the transcription worker stopped".into()));
         }
     }
@@ -569,7 +579,7 @@ impl App {
             return;
         };
         self.preview_pending.set(true);
-        self.worker.preview(samples);
+        self.worker.borrow().preview(samples);
     }
 
     /// Show the tail of the running transcript, or hide the label when empty.
@@ -619,7 +629,7 @@ impl App {
                 self.empty_page.set_title("Model unavailable");
                 self.empty_page.set_description(Some(&err));
                 self.banner
-                    .set_title("No speech model. Download one, then choose it in Preferences.");
+                    .set_title("No speech model yet. Choose one and yapper will download it.");
                 self.banner.set_revealed(true);
                 self.set_state(State::Broken("no speech model".into()));
                 if self.quick && !self.window.is_visible() {
@@ -965,6 +975,92 @@ impl App {
         );
     }
 
+    /// Hand worker events to `handle_event` until that worker is replaced.
+    ///
+    /// A model being swapped leaves the old thread finishing whatever it was
+    /// doing; its answers are for a model that is no longer in use, so they are
+    /// dropped rather than pasted into the window.
+    fn listen(self: &Rc<Self>, events: async_channel::Receiver<Event>) {
+        let generation = self.generation.get();
+        glib::spawn_future_local({
+            let app_state = Rc::clone(self);
+            async move {
+                while let Ok(event) = events.recv().await {
+                    if app_state.generation.get() != generation {
+                        break;
+                    }
+                    app_state.handle_event(event);
+                }
+            }
+        });
+    }
+
+    /// Load a different model. The old worker's request channel closes as it is
+    /// dropped, which is what ends its thread and frees the model it held.
+    fn use_model(self: &Rc<Self>) {
+        let worker = transcribe::spawn(&self.config.borrow());
+        let events = worker.events.clone();
+        self.generation.set(self.generation.get() + 1);
+        *self.worker.borrow_mut() = worker;
+        self.listen(events);
+        // The preview the old worker was running will never be answered now,
+        // and the slot it holds would otherwise keep the new model from being
+        // asked for one.
+        self.preview_pending.set(false);
+
+        self.banner.set_revealed(false);
+        // Mid-recording the microphone is still fine and the audio is still
+        // wanted; the model will have loaded by the time there is anything to
+        // transcribe.
+        if !self.is_recording() {
+            self.set_state(State::Loading);
+        }
+    }
+
+    /// The model picker, from the banner or from the menu.
+    fn show_models(self: &Rc<Self>) {
+        let app_state = Rc::clone(self);
+        let config = self.config.borrow().clone();
+        picker::present(
+            &self.window,
+            &config,
+            Rc::new(move |change| {
+                // A different model has to be loaded; a language it was told
+                // is picked up by the worker on the next transcription, which
+                // reloads the recognizer only if it has to.
+                let reload = match change {
+                    picker::Change::Model(model) => {
+                        if app_state.config.borrow().model == model.id {
+                            return;
+                        }
+                        app_state.config.borrow_mut().model = model.id.to_string();
+                        true
+                    }
+                    picker::Change::Language {
+                        model,
+                        hears,
+                        writes,
+                    } => {
+                        app_state
+                            .config
+                            .borrow_mut()
+                            .set_language(model, hears, writes);
+                        false
+                    }
+                };
+                if let Err(err) = app_state.config.borrow().save() {
+                    eprintln!("yapper: could not save the model choice: {err:#}");
+                }
+                if reload {
+                    app_state.use_model();
+                } else {
+                    let settings = transcribe::Settings::from_config(&app_state.config.borrow());
+                    app_state.worker.borrow().apply(settings);
+                }
+            }),
+        );
+    }
+
     fn show_preferences(self: &Rc<Self>) {
         let app_state = Rc::clone(self);
         preferences::present(
@@ -974,12 +1070,16 @@ impl App {
         );
     }
 
-    /// Take on preferences edited in the dialog. Everything is live except the
-    /// model, which was loaded when the worker started.
+    /// Take on preferences edited in the dialog. Everything is live, the model
+    /// included: a different one is loaded there and then.
     fn apply_config(self: &Rc<Self>, config: &Config) {
-        let previous_limit = self.config.borrow().history_limit;
+        let (previous_limit, previous_model) = {
+            let current = self.config.borrow();
+            (current.history_limit, current.model.clone())
+        };
         *self.config.borrow_mut() = config.clone();
         self.worker
+            .borrow()
             .apply(transcribe::Settings::from_config(config));
 
         if config.history_limit != previous_limit {
@@ -988,6 +1088,9 @@ impl App {
         }
         if !config.live_preview {
             self.show_preview("");
+        }
+        if config.model != previous_model {
+            self.use_model();
         }
     }
 

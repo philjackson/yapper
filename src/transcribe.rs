@@ -1,18 +1,22 @@
-//! Whisper inference on a dedicated worker thread.
+//! Inference on a dedicated worker thread.
 //!
-//! The model is large and loading it takes seconds, so it lives on its own
-//! thread for the life of the process. The UI talks to it over async channels
-//! that GTK's main loop can await without blocking.
+//! Loading a model takes a moment and holding it costs memory, so it lives on
+//! its own thread for the life of the process. The UI talks to it over async
+//! channels that GTK's main loop can await without blocking.
+//!
+//! sherpa-onnx bakes the language and the thread count into a recognizer when
+//! it is built, so changing one reloads the model — under a second, and only
+//! when the setting actually moves.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use sherpa_onnx::*;
 
 use crate::audio::rms;
 use crate::config::Config;
+use crate::models;
 
 /// Work sent from the UI to the worker.
 pub enum Request {
@@ -38,20 +42,26 @@ pub enum Event {
 #[derive(Clone)]
 pub struct Settings {
     pub silence_threshold: f32,
-    pub language: Option<String>,
+    /// The language the chosen model listens for, and the one it writes.
+    /// Already clamped to codes its engine accepts, so nothing the file says
+    /// can stop a model loading.
+    pub hears: String,
+    pub writes: String,
     pub threads: i32,
-    pub translate: bool,
-    pub prompt: Option<String>,
 }
 
 impl Settings {
     pub fn from_config(config: &Config) -> Self {
+        let (hears, writes) = match config.model() {
+            Some(model) => config.language(model),
+            // No model, so nothing will be asked of these.
+            None => ("en", "en"),
+        };
         Self {
             silence_threshold: config.silence_threshold,
-            language: config.language_code().map(str::to_owned),
+            hears: hears.to_string(),
+            writes: writes.to_string(),
             threads: config.thread_count(),
-            translate: config.translate,
-            prompt: config.prompt().map(str::to_owned),
         }
     }
 }
@@ -60,14 +70,14 @@ pub struct Worker {
     pub requests: async_channel::Sender<Request>,
     pub events: async_channel::Receiver<Event>,
     settings: Arc<Mutex<Settings>>,
-    /// Raised when the real transcription is queued, so a preview still running
-    /// gives up its slice of the GPU instead of delaying the text that counts.
+    /// Raised when the real transcription is queued, so a preview waiting its
+    /// turn is dropped rather than delaying the text that counts.
     interrupt: Arc<AtomicBool>,
 }
 
 impl Worker {
-    /// Apply changed preferences. The model itself is loaded once at startup,
-    /// so a different model still needs a restart; everything else is per-job.
+    /// Apply changed preferences. The worker reloads the model if one of the
+    /// settings baked into it moved.
     pub fn apply(&self, settings: Settings) {
         *self.settings.lock().unwrap() = settings;
     }
@@ -97,19 +107,26 @@ pub fn spawn(config: &Config) -> Worker {
     let settings = Arc::new(Mutex::new(Settings::from_config(config)));
     let worker_settings = Arc::clone(&settings);
 
-    let model_path = config.model_path.clone();
+    let chosen = config.model();
+    let setting = config.model.clone();
 
     std::thread::Builder::new()
-        .name("whisper".into())
+        .name("transcribe".into())
         .spawn(move || {
-            let context = match load_model(&model_path) {
-                Ok(context) => {
-                    let _ = event_tx.send_blocking(Event::ModelReady);
-                    context
-                }
-                Err(err) => {
-                    let _ = event_tx.send_blocking(Event::ModelFailed(format!("{err:#}")));
-                    return;
+            let mut model = {
+                let settings = worker_settings.lock().unwrap().clone();
+                match chosen
+                    .ok_or_else(|| missing_model(&setting))
+                    .and_then(|model| Loaded::load(model, &settings))
+                {
+                    Ok(model) => {
+                        let _ = event_tx.send_blocking(Event::ModelReady);
+                        model
+                    }
+                    Err(err) => {
+                        let _ = event_tx.send_blocking(Event::ModelFailed(format!("{err:#}")));
+                        return;
+                    }
                 }
             };
 
@@ -117,18 +134,16 @@ pub fn spawn(config: &Config) -> Worker {
                 let settings = worker_settings.lock().unwrap().clone();
                 match request {
                     Request::Preview(samples) => {
-                        // Stale the moment the user stops talking.
+                        // Stale the moment the user stops talking. These models
+                        // decode a whole utterance at once and cannot be
+                        // stopped part way, so the check happens before the
+                        // work rather than during it.
                         if worker_interrupt.load(Ordering::Relaxed) {
                             continue;
                         }
-                        let abort = Arc::clone(&worker_interrupt);
-                        let text = run(
-                            &context,
-                            &samples,
-                            &settings,
-                            Some(Box::new(move || abort.load(Ordering::Relaxed))),
-                        )
-                        .unwrap_or_default();
+                        // A preview is not worth reloading a model for; it runs
+                        // with whatever is already in memory.
+                        let text = model.run(&samples, &settings).unwrap_or_default();
                         // Always answer unless we were cut short, so the UI
                         // knows the slot is free again even after a failure.
                         if !worker_interrupt.load(Ordering::Relaxed) {
@@ -137,16 +152,23 @@ pub fn spawn(config: &Config) -> Worker {
                     }
                     Request::Transcribe(samples) => {
                         worker_interrupt.store(false, Ordering::Relaxed);
-                        let event = match run(&context, &samples, &settings, None) {
-                            Ok(text) => Event::Done(text),
+                        // A language the loaded model was not built for. The old
+                        // recognizer stays if this fails, so a typo in the
+                        // language box costs a transcription rather than the
+                        // session.
+                        let event = match model.refresh(&settings) {
                             Err(err) => Event::Failed(format!("{err:#}")),
+                            Ok(()) => match model.run(&samples, &settings) {
+                                Ok(text) => Event::Done(text),
+                                Err(err) => Event::Failed(format!("{err:#}")),
+                            },
                         };
                         let _ = event_tx.send_blocking(event);
                     }
                 }
             }
         })
-        .expect("spawning the whisper worker thread");
+        .expect("spawning the transcription worker thread");
 
     Worker {
         requests: request_tx,
@@ -156,73 +178,159 @@ pub fn spawn(config: &Config) -> Worker {
     }
 }
 
-fn load_model(path: &Path) -> Result<WhisperContext> {
-    if !path.exists() {
-        return Err(anyhow!(
-            "model not found at {}\n\nRun ./scripts/fetch-model.sh to download one, or fetch a \
-             ggml model by hand from\n{}\nand point Preferences at it.",
-            path.display(),
-            crate::config::MODELS_URL
-        ));
+fn missing_model(setting: &str) -> anyhow::Error {
+    if setting.is_empty() {
+        anyhow!("no model chosen yet. Pick one and yapper will download it.")
+    } else {
+        anyhow!("no model called {setting}. Pick one and yapper will download it.")
     }
-    let path = path
-        .to_str()
-        .ok_or_else(|| anyhow!("model path is not valid UTF-8"))?;
-    WhisperContext::new_with_params(path, WhisperContextParameters::default())
-        .context("loading the whisper model")
 }
 
-pub(crate) fn run(
-    context: &WhisperContext,
-    samples: &[f32],
-    settings: &Settings,
-    // Present for previews, which are allowed to give up part way.
-    abort: Option<Box<dyn FnMut() -> bool + 'static>>,
-) -> Result<String> {
-    // Whisper invents speech when handed silence or a fragment, so screen both
-    // out before they reach the model.
-    if samples.len() < crate::audio::TARGET_RATE as usize / 2
-        || is_silent(samples, settings.silence_threshold)
-    {
-        return Ok(String::new());
-    }
+/// A loaded recognizer, and the settings it was built for.
+struct Loaded {
+    model: &'static models::Model,
+    recognizer: OfflineRecognizer,
+    baked: Baked,
+}
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    if let Some(abort) = abort {
-        params.set_abort_callback_safe(abort);
-        // Previews trade accuracy for latency: no temperature fallback, which
-        // is what makes a hard segment take several times as long.
-        params.set_temperature_inc(0.0);
-        params.set_no_context(true);
-    }
-    params.set_language(settings.language.as_deref());
-    // Context for the decoder: names and jargon it would otherwise guess at.
-    if let Some(prompt) = settings.prompt.as_deref() {
-        params.set_initial_prompt(prompt);
-    }
-    params.set_n_threads(settings.threads);
-    params.set_translate(settings.translate);
-    params.set_suppress_blank(true);
-    params.set_suppress_nst(true);
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
+/// The settings a recognizer cannot be told about after it is built.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Baked {
+    hears: String,
+    writes: String,
+    threads: i32,
+}
 
-    let mut state = context.create_state().context("creating a whisper state")?;
-    state.full(params, samples).context("running whisper")?;
-
-    let mut text = String::new();
-    for segment in state.as_iter() {
-        let segment = segment.to_str_lossy()?;
-        let segment = segment.trim();
-        if is_annotation(segment) {
-            continue;
+impl Baked {
+    fn of(settings: &Settings) -> Self {
+        Self {
+            hears: settings.hears.clone(),
+            writes: settings.writes.clone(),
+            threads: settings.threads,
         }
-        text.push_str(segment);
-        text.push(' ');
     }
-    Ok(text.trim().to_string())
+}
+
+impl Loaded {
+    fn load(model: &'static models::Model, settings: &Settings) -> Result<Self> {
+        if !models::is_installed(model) {
+            return Err(anyhow!(
+                "{} is not downloaded yet. Choose it in Preferences and yapper will fetch it.",
+                model.name
+            ));
+        }
+        Ok(Self {
+            model,
+            recognizer: build(model, settings)?,
+            baked: Baked::of(settings),
+        })
+    }
+
+    /// Rebuild if the settings have moved somewhere the loaded recognizer
+    /// cannot follow.
+    fn refresh(&mut self, settings: &Settings) -> Result<()> {
+        let wanted = Baked::of(settings);
+        if self.baked == wanted {
+            return Ok(());
+        }
+        // Built first, so a failure leaves the working recognizer in place.
+        self.recognizer = build(self.model, settings)?;
+        self.baked = wanted;
+        Ok(())
+    }
+
+    /// Transcribe a clip. The recognizers hand back the whole utterance at
+    /// once, which is why a preview runs one at a time.
+    fn run(&self, samples: &[f32], settings: &Settings) -> Result<String> {
+        // Every model here invents speech when handed silence or a fragment, so
+        // screen both out before they reach it.
+        if samples.len() < crate::audio::TARGET_RATE as usize / 2
+            || is_silent(samples, settings.silence_threshold)
+        {
+            return Ok(String::new());
+        }
+
+        let stream = self.recognizer.create_stream();
+        stream.accept_waveform(crate::audio::TARGET_RATE as i32, samples);
+        self.recognizer.decode(&stream);
+        let text = stream
+            .get_result()
+            .map(|result| result.text)
+            .ok_or_else(|| anyhow!("the recognizer returned nothing"))?;
+        let text = text.trim();
+        if is_annotation(text) {
+            return Ok(String::new());
+        }
+        Ok(text.to_string())
+    }
+}
+
+/// Build a recognizer. Each family names its files differently, which is the
+/// only reason they are told apart at all: the decoding itself is one call.
+fn build(model: &models::Model, settings: &Settings) -> Result<OfflineRecognizer> {
+    // Every file the catalogue promised, or a clear word about which one is
+    // missing rather than sherpa's own silence.
+    let file = |name: &str| -> Result<String> {
+        let path = models::file(model, name).ok_or_else(|| {
+            anyhow!(
+                "{} is missing {name}. Download it again in Preferences.",
+                model.name
+            )
+        })?;
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("model path is not valid UTF-8"))
+    };
+
+    let mut config = OfflineRecognizerConfig::default();
+    config.model_config.tokens = Some(file("tokens.txt")?);
+    config.model_config.num_threads = settings.threads;
+
+    match model.engine {
+        models::Engine::Canary => {
+            // Canary has to be told which language it is listening to; it does
+            // not detect one. Writing a different language out is what its
+            // translation is.
+            config.model_config.canary = OfflineCanaryModelConfig {
+                encoder: Some(file("encoder.int8.onnx")?),
+                decoder: Some(file("decoder.int8.onnx")?),
+                src_lang: Some(settings.hears.clone()),
+                tgt_lang: Some(settings.writes.clone()),
+                use_pnc: true,
+            };
+        }
+        models::Engine::Transducer => {
+            config.model_config.transducer = OfflineTransducerModelConfig {
+                encoder: Some(file("encoder.int8.onnx")?),
+                decoder: Some(file("decoder.int8.onnx")?),
+                joiner: Some(file("joiner.int8.onnx")?),
+            };
+        }
+        models::Engine::Moonshine => {
+            config.model_config.moonshine = OfflineMoonshineModelConfig {
+                preprocessor: Some(file("preprocess.onnx")?),
+                encoder: Some(file("encode.int8.onnx")?),
+                uncached_decoder: Some(file("uncached_decode.int8.onnx")?),
+                cached_decoder: Some(file("cached_decode.int8.onnx")?),
+                merged_decoder: None,
+            };
+        }
+        models::Engine::SenseVoice => {
+            config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
+                model: Some(file("model.int8.onnx")?),
+                // SenseVoice refuses to load on a language outside its own
+                // six, which is why this has been through the clamp.
+                language: Some(settings.hears.clone()),
+                // Numbers as digits and dates as dates, which is what you want
+                // in the middle of a sentence you are dictating.
+                use_itn: true,
+            };
+        }
+    }
+
+    OfflineRecognizer::create(&config)
+        .ok_or_else(|| anyhow!("loading {} — sherpa-onnx would not start", model.name))
+        .context("building the recognizer")
 }
 
 /// True when no short stretch of the clip rises above the threshold.
@@ -233,14 +341,16 @@ pub(crate) fn run(
 /// quiet utterances as the threshold rises. The live detector works in blocks,
 /// and one setting should mean one thing in both places.
 fn is_silent(samples: &[f32], threshold: f32) -> bool {
-    !samples.chunks(SILENCE_BLOCK).any(|block| rms(block) >= threshold)
+    !samples
+        .chunks(SILENCE_BLOCK)
+        .any(|block| rms(block) >= threshold)
 }
 
 /// 30ms at 16 kHz: long enough to be a stable measure, short enough that one
 /// word registers.
 const SILENCE_BLOCK: usize = 480;
 
-/// Whisper narrates non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and
+/// Models narrate non-speech as `[BLANK_AUDIO]`, `(music)`, `*sighs*` and
 /// friends. Nobody wants that pasted into their editor.
 fn is_annotation(segment: &str) -> bool {
     if segment.len() < 2 {
@@ -257,9 +367,6 @@ fn is_annotation(segment: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// End-to-end check against a known clip. Needs the model downloaded, so it
-    /// runs on request:
-    ///   YAPPER_TEST_WAV=samples/jfk.wav cargo test --release -- --ignored sample_wav
     #[test]
     fn annotations_are_dropped_but_speech_is_kept() {
         assert!(is_annotation("[BLANK_AUDIO]"));
@@ -304,47 +411,90 @@ mod tests {
         );
     }
 
-    /// Proves the vocabulary reaches the decoder. Steering it towards nonsense
-    /// is the clearest way to see it land — a real vocabulary would only nudge
-    /// words the model already nearly had.
-    ///   YAPPER_TEST_WAV=samples/jfk.wav cargo test --release -- --ignored prompt_reaches
+    /// Reloading is what makes a language change land, so the comparison that
+    /// decides it has to notice each setting that is baked in.
     #[test]
-    #[ignore]
-    fn prompt_reaches_the_decoder() {
-        let path = std::env::var("YAPPER_TEST_WAV").expect("set YAPPER_TEST_WAV");
-        let samples = read_pcm16_wav(&path);
-        let config = Config::load().expect("loading config");
-        let context = load_model(&config.model_path).expect("loading the model");
+    fn a_reload_is_triggered_by_the_settings_that_are_baked_in() {
+        let base = Settings {
+            silence_threshold: 0.01,
+            hears: "en".into(),
+            writes: "en".into(),
+            threads: 4,
+        };
+        assert_eq!(Baked::of(&base), Baked::of(&base.clone()));
 
-        let plain = run(&context, &samples, &Settings::from_config(&config), None)
-            .expect("transcribing");
-        let prompted = run(
-            &context,
-            &samples,
-            &Settings {
-                prompt: Some("Siobhan, Niamh, Loughborough, Sainsbury's".into()),
-                ..Settings::from_config(&config)
-            },
-            None,
-        )
-        .expect("transcribing");
+        // German in, German out.
+        let german = Settings {
+            hears: "de".into(),
+            writes: "de".into(),
+            ..base.clone()
+        };
+        assert_ne!(Baked::of(&base), Baked::of(&german));
 
-        println!("  without prompt: {plain}");
-        println!("  with prompt:    {prompted}");
-        assert!(!plain.is_empty() && !prompted.is_empty());
+        // German in, English out: the same language heard, a different one
+        // written, and a recognizer that has to be rebuilt to do it.
+        let translating = Settings {
+            hears: "de".into(),
+            writes: "en".into(),
+            ..base.clone()
+        };
+        assert_ne!(Baked::of(&german), Baked::of(&translating));
+
+        let busier = Settings {
+            threads: 8,
+            ..base.clone()
+        };
+        assert_ne!(Baked::of(&base), Baked::of(&busier));
+
+        // The threshold is read per job, so it must not cost a reload.
+        let fussier = Settings {
+            silence_threshold: 0.05,
+            ..base.clone()
+        };
+        assert_eq!(Baked::of(&base), Baked::of(&fussier));
     }
 
+    /// End to end against a known clip, with whichever model the config points
+    /// at. Needs that model downloaded, so it runs on request:
+    ///   YAPPER_TEST_WAV=samples/jfk.wav cargo test --release -- --ignored sample_wav
     #[test]
     #[ignore]
     fn transcribes_a_sample_wav() {
-        let path = std::env::var("YAPPER_TEST_WAV").expect("set YAPPER_TEST_WAV");
-        let samples = read_pcm16_wav(&path);
         let config = Config::load().expect("loading config");
-        let context = load_model(&config.model_path).expect("loading the model");
+        let samples =
+            read_pcm16_wav(&std::env::var("YAPPER_TEST_WAV").expect("set YAPPER_TEST_WAV"));
         let settings = Settings::from_config(&config);
-        let text = run(&context, &samples, &settings, None).expect("transcribing");
+        let model = Loaded::load(config.model().expect("a model"), &settings).expect("loading it");
+        let text = model.run(&samples, &settings).expect("transcribing");
         println!("transcript: {text}");
         assert!(!text.is_empty());
+    }
+
+    /// Every model in the catalogue that is downloaded, against the same clip.
+    /// The one test that proves each family is wired to the right files:
+    ///   YAPPER_TEST_WAV=samples/jfk.wav cargo test --release -- --ignored every_installed
+    #[test]
+    #[ignore]
+    fn every_installed_model_transcribes() {
+        let config = Config::load().expect("loading config");
+        let settings = Settings::from_config(&config);
+        let samples =
+            read_pcm16_wav(&std::env::var("YAPPER_TEST_WAV").expect("set YAPPER_TEST_WAV"));
+
+        let mut tried = 0;
+        for model in models::CATALOGUE {
+            if !models::is_installed(model) {
+                println!("  {} — not downloaded, skipped", model.name);
+                continue;
+            }
+            let loaded = Loaded::load(model, &settings).expect("loading it");
+            let started = std::time::Instant::now();
+            let text = loaded.run(&samples, &settings).expect("transcribing");
+            println!("  {} — {:?} — {text}", model.name, started.elapsed());
+            assert!(!text.is_empty(), "{} transcribed nothing", model.name);
+            tried += 1;
+        }
+        assert!(tried > 0, "no models are downloaded");
     }
 
     /// Minimal 16-bit PCM WAV reader, just enough for the test fixture.
@@ -353,7 +503,8 @@ mod tests {
         let mut offset = 12; // past "RIFF<size>WAVE"
         while offset + 8 <= bytes.len() {
             let id = &bytes[offset..offset + 4];
-            let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let size =
+                u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
             let body = offset + 8;
             if id == b"data" {
                 return bytes[body..body + size]

@@ -1,6 +1,6 @@
 //! Microphone capture via cpal (which talks to PipeWire through ALSA/Pulse).
 //!
-//! Whisper wants 16 kHz mono f32, so we ask the device for that directly when it
+//! The models want 16 kHz mono f32, so we ask the device for that directly when it
 //! can do it and resample afterwards when it can't.
 
 use std::sync::{Arc, Mutex};
@@ -151,7 +151,7 @@ impl Recorder {
         self.prepare(raw)
     }
 
-    /// Stop capturing and hand back 16 kHz mono audio ready for Whisper.
+    /// Stop capturing and hand back 16 kHz mono audio ready to transcribe.
     pub fn finish(self) -> Vec<f32> {
         let raw = std::mem::take(&mut self.capture.lock().unwrap().samples);
         self.prepare(raw)

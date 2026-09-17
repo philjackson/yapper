@@ -22,10 +22,9 @@ jobs:
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            git github-cli rust cargo cmake clang \
+            git github-cli rust cargo \
             gtk4 libadwaita gtk4-layer-shell \
-            alsa-lib \
-            vulkan-headers vulkan-icd-loader shaderc
+            alsa-lib
 
       - uses: actions/checkout@v4
 
@@ -67,7 +66,7 @@ jobs:
 
           mkdir -p "dist/$name"
           cp target/release/yapper README.md LICENSE "dist/$name/"
-          cp -r data scripts "dist/$name/"
+          cp -r data "dist/$name/"
 
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
@@ -89,5 +88,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Built on Arch with Vulkan. Needs GTK4, libadwaita, gtk4-layer-shell, wl-clipboard and a Vulkan loader at runtime, plus a Whisper model — see the README." \
+            --notes "Built on Arch. Needs GTK4, libadwaita, gtk4-layer-shell, wl-clipboard and curl at runtime; yapper downloads a model itself on first run. See the README." \
             dist/*.tar.gz dist/*.sha256

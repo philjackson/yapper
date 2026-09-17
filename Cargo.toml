@@ -12,20 +12,16 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
 glib = { version = "0.22", features = ["v2_72"] }
 gtk-layer-shell = { package = "gtk4-layer-shell", version = "0.8" }
 cpal = "0.18"
-whisper-rs = "0.16"
+# The speech models: Canary, Parakeet, Moonshine, SenseVoice. The build script
+# fetches a prebuilt static library, so the binary is self-contained and
+# inference never leaves the machine.
+sherpa-onnx = "1.13"
 anyhow = "1"
 async-channel = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 libc = "0.2"
-
-[features]
-# Whisper inference on the GPU. The backend is linked at build time, so a
-# machine without the Vulkan SDK needs --no-default-features to build at all.
-default = ["vulkan"]
-vulkan = ["whisper-rs/vulkan"]
-cuda = ["whisper-rs/cuda"]
 
 [profile.release]
 opt-level = 3

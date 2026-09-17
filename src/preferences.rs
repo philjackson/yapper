@@ -2,14 +2,19 @@
 //!
 //! Changes apply and save as you make them, which is the GNOME convention and
 //! saves having an OK button that can be forgotten. Everything takes effect on
-//! the next transcription except the model, which is loaded once at startup.
+//! the next transcription, the model included — picking one in the [picker]
+//! loads it there and then.
+//!
+//! [picker]: crate::picker
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 
-use crate::config::{Config, MODELS_URL, models_dir};
+use crate::config::Config;
+use crate::models::Engine;
+use crate::picker;
 
 /// Called after every change, with the updated config.
 pub type OnChange = Rc<dyn Fn(&Config)>;
@@ -51,8 +56,43 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
         .build();
     let page = adw::PreferencesPage::new();
 
-    page.add(&transcription_group(parent, &prefs));
-    page.add(&vocabulary_group(&prefs));
+    let (transcription, rows) = transcription_group(&prefs);
+
+    // What a model can be told varies by engine, so the rows follow whichever
+    // one is chosen rather than offering settings it would ignore.
+    let reflect: Rc<dyn Fn(&Config)> = Rc::new({
+        let rows = rows.clone();
+        move |config| rows.reflect(config)
+    });
+    reflect(&prefs.config.borrow());
+
+    rows.choose.connect_clicked({
+        let parent = parent.as_ref().clone();
+        let prefs = Rc::clone(&prefs);
+        let reflect = Rc::clone(&reflect);
+        move |_| {
+            let prefs = Rc::clone(&prefs);
+            let reflect = Rc::clone(&reflect);
+            let config = prefs.config.borrow().clone();
+            picker::present(
+                &parent,
+                &config,
+                Rc::new(move |change| {
+                    prefs.update(|config| match change {
+                        picker::Change::Model(model) => config.model = model.id.to_string(),
+                        picker::Change::Language {
+                            model,
+                            hears,
+                            writes,
+                        } => config.set_language(model, hears, writes),
+                    });
+                    reflect(&prefs.config.borrow());
+                }),
+            );
+        }
+    });
+
+    page.add(&transcription);
     page.add(&output_group(&prefs));
     page.add(&window_group(&prefs));
 
@@ -60,101 +100,71 @@ pub fn present(parent: &impl IsA<gtk::Widget>, config: &Config, on_change: OnCha
     dialog.present(Some(parent));
 }
 
-/// Open the page the models come from, in the browser.
-pub fn open_models_page(parent: Option<&gtk::Window>) {
-    gtk::UriLauncher::new(MODELS_URL).launch(parent, gtk::gio::Cancellable::NONE, |result| {
-        if let Err(err) = result {
-            eprintln!("yapper: could not open {MODELS_URL}: {err}");
-        }
-    });
+/// The rows whose meaning depends on the model in use. Widget handles, so
+/// cloning one into a closure is free.
+#[derive(Clone)]
+struct Rows {
+    model: adw::ActionRow,
+    choose: gtk::Button,
 }
 
-fn transcription_group(parent: &impl IsA<gtk::Widget>, prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
+impl Rows {
+    /// Say which model is in use and what it has been told to listen for. The
+    /// language lives with the model, in the picker, because which codes mean
+    /// anything is the model's own business.
+    fn reflect(&self, config: &Config) {
+        self.model.set_subtitle(&match config.model() {
+            None => format!("{} — not a model yapper knows about", config.model),
+            Some(model) if !crate::models::is_installed(model) => {
+                format!("{} — not downloaded yet", model.name)
+            }
+            Some(model) => format!("{} · {}", model.name, spoken(config, model)),
+        });
+    }
+}
+
+/// What a model is listening for, in a few words: the language, or the pair
+/// when it is writing a different one, or how it decides for itself.
+fn spoken(config: &Config, model: &crate::models::Model) -> String {
+    if !model.engine.takes_language() {
+        return match model.engine {
+            Engine::Moonshine => "English".to_string(),
+            _ => "detects the language itself".to_string(),
+        };
+    }
+    let (hears, writes) = config.language(model);
+    let heard = model.engine.language_name(hears);
+    if hears == writes {
+        if hears == "auto" {
+            "detects the language itself".to_string()
+        } else {
+            heard.to_string()
+        }
+    } else {
+        format!("{heard} → {}", model.engine.language_name(writes))
+    }
+}
+
+fn transcription_group(prefs: &Rc<Prefs>) -> (adw::PreferencesGroup, Rows) {
     let group = adw::PreferencesGroup::builder()
         .title("Transcription")
-        .description("The model is loaded once, so a new one takes effect next time yapper starts")
+        .description("Choosing a model downloads it if it isn't here, and loads it straight away")
         .build();
-    let window = parent.root().and_downcast::<gtk::Window>();
 
     // --- model -------------------------------------------------------------
-    let model_row = adw::ActionRow::builder()
+    // One row, and everything about models happens behind it: the catalogue,
+    // the downloads, and whatever is already on the disk.
+    let model = adw::ActionRow::builder()
         .title("Model")
-        .subtitle(prefs.get(|c| c.model_path.display().to_string()))
         .subtitle_lines(2)
         .build();
     let choose = gtk::Button::builder()
         .label("Choose\u{2026}")
         .valign(gtk::Align::Center)
         .build();
-    choose.connect_clicked({
-        let window = window.clone();
-        let prefs = Rc::clone(prefs);
-        let model_row = model_row.clone();
-        move |_| {
-            let filter = gtk::FileFilter::new();
-            filter.set_name(Some("Whisper models"));
-            filter.add_pattern("*.bin");
-
-            let dialog = gtk::FileDialog::builder()
-                .title("Choose a Whisper model")
-                .default_filter(&filter)
-                .initial_folder(&gtk::gio::File::for_path(models_dir()))
-                .build();
-
-            let prefs = Rc::clone(&prefs);
-            let model_row = model_row.clone();
-            dialog.open(window.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
-                // Cancelling is a normal outcome, not an error worth reporting.
-                let Some(path) = result.ok().and_then(|file| file.path()) else {
-                    return;
-                };
-                model_row.set_subtitle(&path.display().to_string());
-                prefs.update(|c| c.model_path = path);
-            });
-        }
-    });
-    model_row.add_suffix(&choose);
-    model_row.set_activatable_widget(Some(&choose));
-    group.add(&model_row);
-
-    // --- where to get one --------------------------------------------------
-    let get_models = adw::ActionRow::builder()
-        .title("Get more models")
-        .subtitle("tiny 75 MB · base 148 MB · small 488 MB · medium 1.5 GB · large 3.1 GB")
-        .subtitle_lines(2)
-        .build();
-    let browse = gtk::Button::builder()
-        .icon_name("web-browser-symbolic")
-        .tooltip_text(MODELS_URL)
-        .valign(gtk::Align::Center)
-        .css_classes(["flat"])
-        .build();
-    browse.connect_clicked(move |_| open_models_page(window.as_ref()));
-    get_models.add_suffix(&browse);
-    get_models.set_activatable_widget(Some(&browse));
-    group.add(&get_models);
-
-    // --- language ----------------------------------------------------------
-    let language = entry_row(
-        prefs,
-        "Language",
-        "An ISO code such as en or de, or auto to detect it from the speech",
-        |c| c.language.clone(),
-        |c, text| {
-            let text = text.trim();
-            // An empty box means "auto" rather than a broken setting.
-            c.language = if text.is_empty() { "auto" } else { text }.to_string();
-        },
-    );
-    group.add(&language);
-
-    group.add(&switch_row(
-        prefs,
-        "Translate to English",
-        Some("Transcribe speech in other languages as English"),
-        |c| c.translate,
-        |c, on| c.translate = on,
-    ));
+    model.add_suffix(&choose);
+    model.set_activatable_widget(Some(&choose));
+    group.add(&model);
 
     group.add(&spin_row(
         prefs,
@@ -171,33 +181,7 @@ fn transcription_group(parent: &impl IsA<gtk::Widget>, prefs: &Rc<Prefs>) -> adw
         |c, value| c.threads = value as u32,
     ));
 
-    group
-}
-
-/// The whole point of this group is the description: an empty box with the
-/// word "Vocabulary" over it tells nobody what to type in it.
-fn vocabulary_group(prefs: &Rc<Prefs>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder()
-        .title("Vocabulary")
-        .description(
-            "Names and jargon the model keeps getting wrong. It reads these \
-             before your speech and leans towards them, so write them as you \
-             would say them, separated by commas.\n\n\
-             For example: Siobhan, Niamh, Loughborough, Sainsbury's\n\n\
-             Keep it to a line or two. A long list crowds out the audio and \
-             the model starts hearing your vocabulary instead of you.",
-        )
-        .build();
-
-    group.add(&entry_row(
-        prefs,
-        "Words to expect",
-        "Passed to Whisper as context for every transcription. Leave empty for none.",
-        |c| c.initial_prompt.clone(),
-        |c, text| c.initial_prompt = text.to_string(),
-    ));
-
-    group
+    (group, Rows { model, choose })
 }
 
 /// A live level meter with the silence threshold drawn across it.
@@ -553,25 +537,6 @@ fn spin_row(
     row.connect_value_notify({
         let prefs = Rc::clone(prefs);
         move |row| prefs.update(|c| write(c, row.value()))
-    });
-    row
-}
-
-fn entry_row(
-    prefs: &Rc<Prefs>,
-    title: &str,
-    tooltip: &str,
-    read: fn(&Config) -> String,
-    write: fn(&mut Config, &str),
-) -> adw::EntryRow {
-    let row = adw::EntryRow::builder()
-        .title(title)
-        .text(prefs.get(read))
-        .tooltip_text(tooltip)
-        .build();
-    row.connect_changed({
-        let prefs = Rc::clone(prefs);
-        move |row| prefs.update(|c| write(c, &row.text()))
     });
     row
 }
