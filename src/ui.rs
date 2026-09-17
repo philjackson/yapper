@@ -63,6 +63,10 @@ struct App {
     quick: bool,
     /// Set once we've decided to exit, so the close handler stops intervening.
     quitting: Cell<bool>,
+    /// Whether this particular capture should be typed out. Set per capture
+    /// rather than per process, because one resident process serves keybinds
+    /// that want different things.
+    type_this_capture: Cell<bool>,
     app: adw::Application,
     state: RefCell<State>,
     recorder: RefCell<Option<Recorder>>,
@@ -319,6 +323,7 @@ pub fn build(app: &adw::Application, config: Config, options: Options) {
         config: RefCell::new(config),
         quick: options.quick,
         quitting: Cell::new(false),
+        type_this_capture: Cell::new(options.type_output),
         app: app.clone(),
         state: RefCell::new(State::Loading),
         recorder: RefCell::new(None),
@@ -657,7 +662,7 @@ impl App {
                 {
                     self.report(&format!("Copy failed: {err}"));
                 }
-                if self.config.borrow().type_on_finish
+                if (self.config.borrow().type_on_finish || self.type_this_capture.get())
                     && let Err(err) = output::type_text(&text)
                 {
                     self.report(&format!("{err}"));
@@ -1117,6 +1122,16 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .sensitive(false)
         .css_classes(["circular"])
         .build()
+}
+
+/// Start a capture on the process that is already running, for a launch that
+/// could not simply become it.
+pub fn start_capture(typed: bool) {
+    let Some(running) = RUNNING.with(|running| running.borrow().clone()) else {
+        return;
+    };
+    running.type_this_capture.set(typed);
+    running.reopen();
 }
 
 fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, wanted: bool) {

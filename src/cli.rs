@@ -16,6 +16,8 @@ pub struct Options {
     pub quick: bool,
     /// Tell the resident quick capture process to exit. Shows no window.
     pub stop_daemon: bool,
+    /// Type the transcript into the focused window as well as copying it.
+    pub type_output: bool,
 }
 
 pub const USAGE: &str = "\
@@ -28,6 +30,8 @@ OPTIONS:
     -q, --quick      Quick capture: open as a floating panel, start recording
                      immediately, and copy the transcript to the clipboard on
                      close. Meant to be bound to a key.
+    -t, --type       With --quick: type the transcript into the focused window,
+                     as well as putting it on the clipboard. Needs wtype.
     --stop-daemon    Stop the process quick capture leaves running, freeing
                      the memory the model holds. Shows no window.
     -h, --help       Print this help
@@ -50,6 +54,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         match argument.as_str() {
             "-q" | "--quick" => options.quick = true,
             "--stop-daemon" => options.stop_daemon = true,
+            "-t" | "--type" => options.type_output = true,
             "-h" | "--help" => return Invocation::Help,
             "-V" | "--version" => return Invocation::Version,
             other => {
@@ -75,7 +80,8 @@ mod tests {
             parse_args(&[]),
             Invocation::Run(Options {
                 quick: false,
-                stop_daemon: false
+                stop_daemon: false,
+                type_output: false
             })
         ));
     }
@@ -98,6 +104,26 @@ mod tests {
             parse_args(&["--stop-daemon"]),
             Invocation::Run(Options {
                 stop_daemon: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn typing_can_be_asked_for_per_invocation() {
+        assert!(matches!(
+            parse_args(&["--quick", "--type"]),
+            Invocation::Run(Options {
+                quick: true,
+                type_output: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_args(&["-q", "-t"]),
+            Invocation::Run(Options {
+                quick: true,
+                type_output: true,
                 ..
             })
         ));

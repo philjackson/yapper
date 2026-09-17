@@ -13,6 +13,7 @@ mod ui;
 
 use adw::prelude::*;
 use gtk::glib;
+use gtk::glib::variant::ToVariant;
 
 const APP_ID: &str = "dev.yapper.Yapper";
 /// Quick capture gets its own id so a compositor rule can target it, and so it
@@ -73,7 +74,34 @@ fn main() -> glib::ExitCode {
     });
     app.add_action(&quit);
 
+    // And so a later --quick can say how it wants the transcript delivered.
+    // Plain activation carries no arguments, which is why this is an action.
+    let capture = gtk::gio::SimpleAction::new("capture", Some(glib::VariantTy::BOOLEAN));
+    capture.connect_activate(|_, typed| {
+        let typed = typed.and_then(|typed| typed.get::<bool>()).unwrap_or(false);
+        ui::start_capture(typed);
+    });
+    app.add_action(&capture);
+
     app.connect_activate(move |app| ui::build(app, config.clone(), options));
+
+    // A quick capture whose process is already running asks it to do the work,
+    // passing on how the transcript should be delivered. Without this the flag
+    // would be quietly ignored by whichever invocation happened to start first.
+    if options.quick {
+        if let Err(err) = app.register(gtk::gio::Cancellable::NONE) {
+            eprintln!("yapper: cannot reach the session bus: {err}");
+            return glib::ExitCode::FAILURE;
+        }
+        if app.is_remote() {
+            app.activate_action("capture", Some(&options.type_output.to_variant()));
+            if let Some(bus) = app.dbus_connection() {
+                let _ = bus.flush_sync(gtk::gio::Cancellable::NONE);
+            }
+            return glib::ExitCode::SUCCESS;
+        }
+    }
+
     // Arguments are parsed above, and GTK would otherwise try to open them as files.
     app.run_with_args::<&str>(&[])
 }
